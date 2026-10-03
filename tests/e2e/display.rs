@@ -244,6 +244,19 @@ fn markdown_highlighting() {
 }
 
 #[test]
+fn markdown_fenced_language_highlighting() {
+    let dir = TempDir::new();
+    let path = create_file(dir.path(), "test.md", "```rust\nfn main() {}\n```\n");
+    let mut e = TestEditor::new(&[path.to_str().unwrap()]);
+    // The Rust keyword is on logical line 1, after the two-character gutter.
+    assert_eq!(
+        e.cell_fg(1, 2),
+        ptytest::Color::Indexed(3),
+        "Rust fenced-code keyword should be yellow"
+    );
+}
+
+#[test]
 fn custom_terminal_size() {
     let mut e = TestEditor::with_size(&[], 40, 120);
     let sb = e.status_bar();

@@ -541,11 +541,7 @@ fn selected_binary() -> PathBuf {
         );
         return path;
     }
-    let mut path = std::env::current_exe().expect("test executable path unavailable");
-    path.pop();
-    path.pop();
-    path.push("e");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_e"))
 }
 
 /// Create a file in an application fixture directory.
