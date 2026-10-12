@@ -53,13 +53,7 @@ jobs:
           tags: e-builder:${{ matrix.target }}
           cache-from: type=gha,scope=e-${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=e-${{ matrix.target }}
-      - name: Install Rust toolchain
-        if: matrix.docker_platform == ''
-        run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        if: matrix.docker_platform == ''
-        with:
-          key: ${{ matrix.runner }}-${{ matrix.target }}
+      # rust-toolchain.toml selects the pinned nightly; rustup installs it, with rust-src, on the first cargo call.
       - name: Build macOS release
         if: matrix.docker_platform == ''
         run: make release TARGET="${{ matrix.target }}"

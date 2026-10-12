@@ -1,22 +1,23 @@
 NAME       := e
-RUSTYBENCH  ?= cargo run --quiet --manifest-path ../rustybench/Cargo.toml --
-TEST_BINARY_ENV := E_TEST_BINARY
-TEST_TARGETS := --tests
 HOST       := $(shell rustc -vV | awk '/^host:/ {print $$2}')
 TARGET     ?= $(subst -unknown-linux-gnu,-unknown-linux-musl,$(HOST))
 TARGET_ENV := $(shell printf '%s' "$(TARGET)" | tr '[:lower:]-' '[:upper:]_')
 CARGO_CMD  := $(if $(findstring -linux-musl,$(TARGET)),$(shell command -v musl-cargo 2>/dev/null || printf cargo),cargo)
+comma      := ,
+# Setting RUSTFLAGS replaces the target rustflags from .cargo/config.toml, so the
+# macOS unused-dylib link argument is repeated for release builds.
+RELEASE_RUSTFLAGS := -Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort $(if $(findstring apple-darwin,$(TARGET)),-Clink-arg=-Wl$(comma)-dead_strip_dylibs)
 # Docker's musl-cargo wrapper owns linker, CRT, and loader flags. The Makefile
 # selects only the build mode and keeps Cargo invocations readable on macOS as
 # well as in the Linux release image.
-cargo = $(if $(findstring -linux-musl,$(TARGET)),,$(if $(filter release-static release-dynamic test,$(1)),CARGO_TARGET_$(TARGET_ENV)_LINKER=clang ,)$(if $(filter release-static release-dynamic,$(1)),RUSTFLAGS="-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort")) MUSL_TARGET="$(TARGET)" MUSL_BUILD_MODE="$(1)" $(CARGO_CMD)
+cargo = $(if $(findstring -linux-musl,$(TARGET)),,$(if $(filter release-static release-dynamic test,$(1)),CARGO_TARGET_$(TARGET_ENV)_LINKER=clang ,)$(if $(filter release-static release-dynamic,$(1)),RUSTFLAGS="$(RELEASE_RUSTFLAGS)")) MUSL_TARGET="$(TARGET)" MUSL_BUILD_MODE="$(1)" $(CARGO_CMD)
 
-.PHONY: build test test-ci release release-dynamic verify-release verify-release-dynamic bench bench-hi-lite bench-syscalls install record gifs gen-xsh
+RUSTYBENCH  ?= cargo run --quiet --manifest-path ../rustybench/Cargo.toml --
+TEST_BINARY_ENV := E_TEST_BINARY
+TEST_TARGETS := --tests
 
-# Regenerate the XSH vocabulary region of ../hi-lite/src/languages/xsh.rs from the
-# registry (XSH_REPO overrides the path)
-gen-xsh:
-	cargo run --quiet --example gen_xsh
+.PHONY: build test test-ci lint release release-dynamic verify-release verify-release-dynamic install
+.PHONY: bench bench-hi-lite bench-syscalls gen-xsh record gifs
 
 build:
 	$(call cargo,dev) build
@@ -28,6 +29,10 @@ test-ci:
 	@test -x "target/$(TARGET)/release/$(NAME)"
 	$(TEST_BINARY_ENV)="$(CURDIR)/target/$(TARGET)/release/$(NAME)" \
 	$(call cargo,test) test --quiet --release $(TEST_TARGETS)
+
+lint:
+	cargo fmt --all
+	cargo clippy --fix --allow-dirty --all-targets --all-features -- --deny warnings
 
 release:
 	$(call cargo,release-static) clean -p $(NAME) --release --target $(TARGET)
@@ -60,20 +65,6 @@ verify-release-dynamic:
 		echo "Skipping ELF checks for $(TARGET)"; \
 	fi
 
-lint:
-	cargo fmt --all
-	cargo clippy --fix --allow-dirty --all-targets --all-features -- --deny warnings
-
-bench:
-	@$(RUSTYBENCH) baseline --root "$(CURDIR)" --baseline "$(CURDIR)/benches/baseline.json" -- cargo bench --bench bench
-
-# Benchmark hi-lite independently across the complete checked-in golden corpus.
-bench-hi-lite:
-	@$(RUSTYBENCH) baseline --root "$(CURDIR)" --baseline "$(CURDIR)/../hi-lite/benches/hi-lite-baseline.json" -- cargo bench --manifest-path "$(CURDIR)/../hi-lite/Cargo.toml" --bench hi_lite
-
-bench-syscalls:
-	@$(RUSTYBENCH) syscalls --root "$(CURDIR)"
-
 release-dynamic:
 	$(call cargo,release-dynamic) clean -p $(NAME) --release --target $(TARGET)
 	$(call cargo,release-dynamic) build --release \
@@ -86,6 +77,11 @@ install: release
 	@if test "$$(uname -s)" = Darwin; then \
 		codesign -fs - ~/usr/bin/$(NAME); \
 	fi
+
+# Regenerate the XSH vocabulary region of ../hi-lite/src/languages/xsh.rs from the
+# registry (XSH_REPO overrides the path)
+gen-xsh:
+	cargo run --quiet --example gen_xsh
 
 # Record e2e tests as asciicast .cast files (single-threaded for clean capture)
 record:
