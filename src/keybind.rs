@@ -74,29 +74,51 @@ impl KeybindingTable {
         self.bindings.get(&KeyCombo { key })
     }
 
-    /// Try to load overrides from `~/.config/e/keybindings.ini`.
-    pub fn load_config(&mut self) {
-        let path = config_path();
+    /// Load overrides from `~/.config/e/keybindings.ini`. A missing file (or no
+    /// `HOME`) means no overrides. Valid lines are applied even when others are
+    /// rejected; the error lists every line that could not be used.
+    pub fn load_config(&mut self) -> Result<(), String> {
+        let Some(path) = config_path() else {
+            return Ok(());
+        };
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(_) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("{}: {}", path.display(), e)),
         };
 
-        for line in content.lines() {
+        self.apply_config(&content, &path.display().to_string())
+    }
+
+    /// Apply INI `content`; `origin` names the source in error messages.
+    fn apply_config(&mut self, content: &str, origin: &str) -> Result<(), String> {
+        let mut rejected = Vec::new();
+        for (index, line) in content.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
                 continue;
             }
-            if let Some((key_str, action_str)) = line.split_once('=') {
-                let key_str = key_str.trim().to_lowercase();
-                let action_str = action_str.trim().to_lowercase();
-
-                if let (Some(key), Some(action)) = (parse_key(&key_str), parse_action(&action_str))
-                {
+            let binding = line.split_once('=').and_then(|(key_str, action_str)| {
+                let key = parse_key(&key_str.trim().to_lowercase())?;
+                let action = parse_action(&action_str.trim().to_lowercase())?;
+                Some((key, action))
+            });
+            match binding {
+                Some((key, action)) => {
                     self.bindings.insert(KeyCombo { key }, action);
                 }
+                None => rejected.push(index + 1),
             }
         }
+        if rejected.is_empty() {
+            return Ok(());
+        }
+        let lines: Vec<String> = rejected.iter().map(|n| n.to_string()).collect();
+        Err(format!(
+            "{}: ignored invalid line(s) {}",
+            origin,
+            lines.join(", ")
+        ))
     }
 }
 
@@ -104,12 +126,14 @@ fn kc(key: Key) -> KeyCombo {
     KeyCombo { key }
 }
 
-fn config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".config")
-        .join("e")
-        .join("keybindings.ini")
+fn config_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
+    Some(
+        PathBuf::from(home)
+            .join(".config")
+            .join("e")
+            .join("keybindings.ini"),
+    )
 }
 
 pub fn parse_key(s: &str) -> Option<Key> {
@@ -321,7 +345,8 @@ mod tests {
 
     #[test]
     fn test_config_path_contains_expected_segments() {
-        let path = config_path();
+        // HOME is always set under the test harness.
+        let path = config_path().unwrap();
         let s = path.to_string_lossy();
         assert!(s.contains(".config"));
         assert!(s.contains("keybindings.ini"));
@@ -333,7 +358,7 @@ mod tests {
     fn test_load_config_missing_file() {
         // Should not panic when config file doesn't exist
         let mut kb = KeybindingTable::with_defaults();
-        kb.load_config();
+        let _ = kb.load_config();
         // Defaults should still be present
         assert_eq!(kb.lookup(Key::Ctrl('s')), Some(&EditorAction::Save));
     }
@@ -355,39 +380,28 @@ mod tests {
     }
 
     #[test]
-    fn test_load_config_from_file() {
-        let dir = std::env::temp_dir().join("e_test_keybind");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("keybindings.ini");
-        std::fs::write(
-            &path,
-            b"[keybindings]\nctrl+s = quit\n# comment line\n\n[other]\nctrl+z = save\n",
+    fn test_apply_config_overrides_defaults() {
+        let mut kb = KeybindingTable::with_defaults();
+        kb.apply_config(
+            "[keybindings]\nctrl+s = quit\n# comment line\n\n[other]\nctrl+z = save\n",
+            "test",
         )
         .unwrap();
-
-        let mut kb = KeybindingTable::with_defaults();
-        // Manually parse the file content (since load_config reads from fixed path)
-        let content = std::fs::read_to_string(&path).unwrap();
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
-                continue;
-            }
-            if let Some((key_str, action_str)) = line.split_once('=') {
-                let key_str = key_str.trim().to_lowercase();
-                let action_str = action_str.trim().to_lowercase();
-                if let (Some(key), Some(action)) = (parse_key(&key_str), parse_action(&action_str))
-                {
-                    kb.bindings.insert(KeyCombo { key }, action);
-                }
-            }
-        }
 
         // ctrl+s should now be Quit instead of Save
         assert_eq!(kb.lookup(Key::Ctrl('s')), Some(&EditorAction::Quit));
         // ctrl+z should now be Save instead of Undo
         assert_eq!(kb.lookup(Key::Ctrl('z')), Some(&EditorAction::Save));
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    #[test]
+    fn test_apply_config_reports_invalid_lines_and_keeps_valid_ones() {
+        let mut kb = KeybindingTable::with_defaults();
+        let err = kb
+            .apply_config("ctrl+s = quit\nnonsense\nctrl+q = flyaway\n", "keys.ini")
+            .unwrap_err();
+
+        assert_eq!(err, "keys.ini: ignored invalid line(s) 2, 3");
+        assert_eq!(kb.lookup(Key::Ctrl('s')), Some(&EditorAction::Quit));
     }
 }

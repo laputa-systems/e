@@ -60,12 +60,10 @@ dependencies = [
  "fxhash",
  "laputa-hi-lite",
  "laputa-ptytest",
- "proc-macro2",
  "proptest",
  "regex-lite",
  "rustix",
  "rustybench",
- "syn 2.0.117",
 ]
 
 [[package]]

@@ -38,8 +38,7 @@ fn redo_restores_undone_change() {
 fn new_edit_clears_redo_stack() {
     let mut e = TestEditor::new(&[]);
     e.type_text("first");
-    // Wait for group boundary (time-based)
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // The space starts a new undo group.
     e.type_text(" second");
     e.ctrl('z'); // undo "second"
     // Type something new — should clear redo stack
@@ -109,28 +108,36 @@ fn undo_after_indent() {
 #[test]
 fn multiple_undo_redo_steps() {
     let mut e = TestEditor::new(&[]);
+    // Each leading space starts a new undo group.
     e.type_text("A");
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    e.type_text("B");
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    e.type_text("C");
+    e.type_text(" B");
+    e.type_text(" C");
 
     let full = e.row(0);
-    assert!(full.contains("ABC"), "should have ABC, got: {full}");
+    assert!(full.contains("A B C"), "should have A B C, got: {full}");
 
-    e.ctrl('z'); // undo C
+    e.ctrl('z'); // undo " C"
     let no_c = e.row(0);
-    assert!(no_c.contains("AB"), "after 1 undo: {no_c}");
+    assert!(
+        no_c.contains("A B") && !no_c.contains('C'),
+        "after 1 undo: {no_c}"
+    );
 
-    e.ctrl('z'); // undo B
+    e.ctrl('z'); // undo " B"
     let no_bc = e.row(0);
-    assert!(no_bc.contains("A"), "after 2 undos: {no_bc}");
+    assert!(
+        no_bc.contains('A') && !no_bc.contains('B'),
+        "after 2 undos: {no_bc}"
+    );
 
-    e.ctrl('y'); // redo B
+    e.ctrl('y'); // redo " B"
     let redo_b = e.row(0);
-    assert!(redo_b.contains("AB"), "after 1 redo: {redo_b}");
+    assert!(
+        redo_b.contains("A B") && !redo_b.contains('C'),
+        "after 1 redo: {redo_b}"
+    );
 
-    e.ctrl('y'); // redo C
+    e.ctrl('y'); // redo " C"
     let redo_c = e.row(0);
-    assert!(redo_c.contains("ABC"), "after 2 redos: {redo_c}");
+    assert!(redo_c.contains("A B C"), "after 2 redos: {redo_c}");
 }

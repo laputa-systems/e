@@ -1,7 +1,9 @@
 use std::fs;
 use std::io::{self, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use crate::operation::{UndoGroup, UndoOperation, UndoStack};
 use crate::selection::{CaretSnapshot, Selection, TextPosition};
@@ -11,40 +13,176 @@ pub fn read_file(path: &Path) -> io::Result<Vec<u8>> {
     fs::read(path)
 }
 
-/// Write `data` to `path`. Strips trailing whitespace from each line and ensures
-/// a trailing newline.
-pub fn write_file(path: &Path, data: &[u8]) -> io::Result<()> {
-    let cleaned = strip_trailing_whitespace_and_ensure_newline(data);
-    let mut f = fs::File::create(path)?;
-    f.write_all(&cleaned)?;
-    f.flush()?;
-    Ok(())
-}
-
-/// Clean data for writing: strip trailing whitespace and ensure trailing newline.
+/// Prepare buffer bytes for saving: strip trailing spaces and tabs from every
+/// line and ensure a trailing newline. Works on raw bytes so invalid UTF-8,
+/// non-ASCII whitespace such as NBSP, and CRLF line endings survive a save
+/// untouched.
 pub fn clean_for_write(data: &[u8]) -> Vec<u8> {
-    strip_trailing_whitespace_and_ensure_newline(data)
+    let mut out = Vec::with_capacity(data.len() + 1);
+    for (index, line) in data.split(|&b| b == b'\n').enumerate() {
+        if index > 0 {
+            out.push(b'\n');
+        }
+        let (body, has_carriage_return) = match line.strip_suffix(b"\r") {
+            Some(body) => (body, true),
+            None => (line, false),
+        };
+        let end = body
+            .iter()
+            .rposition(|&b| b != b' ' && b != b'\t')
+            .map_or(0, |last| last + 1);
+        out.extend_from_slice(&body[..end]);
+        if has_carriage_return {
+            out.push(b'\r');
+        }
+    }
+    if !out.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    out
 }
 
-fn strip_trailing_whitespace_and_ensure_newline(data: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(data);
-    let mut out = String::new();
-    for line in text.split('\n') {
-        if !out.is_empty() {
-            out.push('\n');
+/// Write already-cleaned `data` (see `clean_for_write`) to `path`.
+///
+/// `expected_mtime` is the modification time recorded when the editor last
+/// read or wrote the file (`None` when it did not exist); the write is refused
+/// if the file on disk differs, so an external edit is never silently
+/// overwritten. An existing file is replaced by renaming a fsynced temporary
+/// file over it, so a crash or full disk leaves either the old or the new
+/// content. Symlinks are followed and the target keeps its mode and owner.
+/// When a rename cannot preserve that (a hard-linked file, a directory we
+/// cannot create files in, an owner we cannot restore) the file is rewritten
+/// in place instead.
+pub fn write_file(
+    path: &Path,
+    data: &[u8],
+    expected_mtime: Option<SystemTime>,
+) -> io::Result<()> {
+    let target = match fs::canonicalize(path) {
+        Ok(resolved) => resolved,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            if fs::symlink_metadata(path).is_ok() {
+                // Dangling symlink: creating through it is the only way to
+                // keep the link, and renaming over it would replace it.
+                return write_new_file(path, data);
+            }
+            path.to_path_buf()
         }
-        out.push_str(line.trim_end());
+        Err(e) => return Err(e),
+    };
+    if file_modification_time(&target) != expected_mtime {
+        return Err(io::Error::other(
+            "file changed on disk since it was loaded",
+        ));
     }
-    if !out.ends_with('\n') {
-        out.push('\n');
+    let meta = match fs::metadata(&target) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return write_new_file(&target, data);
+        }
+        Err(e) => return Err(e),
+    };
+    if meta.nlink() == 1 && replace_file(&target, data, &meta)? == Replaced::Done {
+        return Ok(());
     }
-    out.into_bytes()
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&target)?;
+    file.write_all(data)?;
+    file.sync_all()
+}
+
+fn write_new_file(path: &Path, data: &[u8]) -> io::Result<()> {
+    // `create_new` also catches a file that appeared since the mtime check.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    sync_parent_dir(path)
+}
+
+#[derive(PartialEq, Eq)]
+enum Replaced {
+    Done,
+    /// The rename strategy cannot keep the target's owner or location
+    /// semantics; the caller must write in place.
+    Unavailable,
+}
+
+fn replace_file(target: &Path, data: &[u8], meta: &fs::Metadata) -> io::Result<Replaced> {
+    let dir = target.parent().unwrap_or(Path::new("."));
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    let temp = dir.join(format!(".{}.e-tmp-{}", name, std::process::id()));
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Ok(Replaced::Unavailable),
+        Err(e) => return Err(e),
+    };
+    let staged = (|| {
+        file.write_all(data)?;
+        // chown before chmod: changing the owner clears setuid/setgid bits.
+        if std::os::unix::fs::fchown(&file, Some(meta.uid()), Some(meta.gid())).is_err() {
+            return Ok(Replaced::Unavailable);
+        }
+        file.set_permissions(fs::Permissions::from_mode(meta.mode()))?;
+        file.sync_all()?;
+        fs::rename(&temp, target)?;
+        Ok(Replaced::Done)
+    })();
+    if !matches!(staged, Ok(Replaced::Done)) {
+        let _ = fs::remove_file(&temp);
+    }
+    if matches!(staged, Ok(Replaced::Done)) {
+        sync_parent_dir(target)?;
+    }
+    staged
+}
+
+/// Persist a create or rename by fsyncing the containing directory.
+fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    fs::File::open(dir)?.sync_all()
+}
+
+/// Per-user state directory `~/.config/e`. There is deliberately no fallback
+/// when `HOME` is unset: any shared default such as `/tmp` would expose edit
+/// history and lock state to other users.
+fn state_dir() -> io::Result<PathBuf> {
+    match std::env::var_os("HOME") {
+        Some(home) if !home.is_empty() => Ok(PathBuf::from(home).join(".config/e")),
+        _ => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "HOME is not set, so ~/.config/e cannot be located",
+        )),
+    }
+}
+
+/// Create `dir` (and missing parents) readable only by the owner, and tighten
+/// a directory left over from an earlier version that used the default mode.
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
 /// Directory for lock files: `~/.config/e/locks/`
-fn locks_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".config/e/locks")
+fn locks_dir() -> io::Result<PathBuf> {
+    Ok(state_dir()?.join("locks"))
 }
 
 /// Encode an absolute file path for use as a filename.
@@ -62,9 +200,9 @@ fn encode_path(path: &Path) -> String {
     out
 }
 
-/// Compute lock file path: `~/.config/e/locks/<encoded_path>.elock`
-pub fn lock_path(path: &Path) -> PathBuf {
-    locks_dir().join(format!("{}.elock", encode_path(path)))
+/// Lock file path: `<locks dir>/<encoded_path>.elock`
+fn lock_path_in(locks_dir: &Path, path: &Path) -> PathBuf {
+    locks_dir.join(format!("{}.elock", encode_path(path)))
 }
 
 /// Resolve a path to absolute. Uses canonicalize if the file exists,
@@ -84,27 +222,111 @@ fn resolve_absolute(path: &Path) -> PathBuf {
     abs_parent.join(name)
 }
 
-/// Acquire a lock file. Returns Err if lock already exists.
-pub fn acquire_lock(path: &Path) -> Result<(), String> {
-    let abs = resolve_absolute(path);
-    let lock = lock_path(&abs);
-    if lock.exists() {
-        return Err(format!(
-            "Lock file exists: {} (another e instance may be editing this file)",
-            lock.display()
-        ));
-    }
-    let dir = locks_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create locks dir: {}", e))?;
-    fs::File::create(&lock).map_err(|e| format!("Failed to create lock file: {}", e))?;
-    Ok(())
+#[derive(Debug)]
+pub enum LockError {
+    /// Another live process holds the lock; `holder_pid` is best effort.
+    Held { holder_pid: Option<u32> },
+    Io(io::Error),
 }
 
-/// Release the lock file, ignoring errors.
-pub fn release_lock(path: &Path) {
-    let abs = resolve_absolute(path);
-    let lock = lock_path(&abs);
-    let _ = fs::remove_file(lock);
+impl std::fmt::Display for LockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LockError::Held {
+                holder_pid: Some(pid),
+            } => write!(f, "locked by another e instance (pid {pid})"),
+            LockError::Held { holder_pid: None } => write!(f, "locked by another e instance"),
+            LockError::Io(e) => write!(f, "cannot create lock file: {e}"),
+        }
+    }
+}
+
+/// Exclusive claim on editing one file, held for the life of the value.
+///
+/// The claim is an `flock` on the lock file, so the kernel drops it when the
+/// process dies by any means; a lock file left behind by a crash is not held
+/// and is simply reacquired. The file records the holder's pid for messages.
+pub struct FileLock {
+    file: fs::File,
+    path: PathBuf,
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Unlink before the descriptor closes and releases the flock, and only
+        // while the path still names our file: after `break_lock` it names
+        // the new owner's file.
+        if linked_to(&self.path, &self.file) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn linked_to(path: &Path, file: &fs::File) -> bool {
+    match (fs::metadata(path), file.metadata()) {
+        (Ok(linked), Ok(ours)) => linked.dev() == ours.dev() && linked.ino() == ours.ino(),
+        _ => false,
+    }
+}
+
+/// Take the lock for `path`, or report who holds it.
+pub fn acquire_lock(path: &Path) -> Result<FileLock, LockError> {
+    let locks_dir = locks_dir().map_err(LockError::Io)?;
+    // The locks directory is created owner-only along with any missing parents;
+    // also tighten a state directory left by a version that used the default mode.
+    create_private_dir(&locks_dir).map_err(LockError::Io)?;
+    create_private_dir(locks_dir.parent().unwrap_or(&locks_dir)).map_err(LockError::Io)?;
+    acquire_lock_in(&locks_dir, path)
+}
+
+fn acquire_lock_in(locks_dir: &Path, path: &Path) -> Result<FileLock, LockError> {
+    let lock = lock_path_in(locks_dir, &resolve_absolute(path));
+    // A holder that exits unlinks the file while we may already have it open;
+    // locking that orphaned inode would not exclude a newcomer, so recheck the
+    // link after locking and retry against the fresh file.
+    for _ in 0..8 {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&lock)
+            .map_err(LockError::Io)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
+                let holder_pid = fs::read_to_string(&lock)
+                    .ok()
+                    .and_then(|text| text.trim().parse().ok());
+                return Err(LockError::Held { holder_pid });
+            }
+            Err(fs::TryLockError::Error(e)) => return Err(LockError::Io(e)),
+        }
+        if linked_to(&lock, &file) {
+            file.set_len(0).map_err(LockError::Io)?;
+            (&file)
+                .write_all(format!("{}\n", std::process::id()).as_bytes())
+                .map_err(LockError::Io)?;
+            return Ok(FileLock { file, path: lock });
+        }
+    }
+    Err(LockError::Io(io::Error::other(
+        "lock file kept changing while locking",
+    )))
+}
+
+/// Unlink the lock file for `path` so a new claim can replace a live holder
+/// the user chose to override. The old holder's drop leaves the new file alone.
+pub fn break_lock(path: &Path) -> io::Result<()> {
+    break_lock_in(&locks_dir()?, path)
+}
+
+fn break_lock_in(locks_dir: &Path, path: &Path) -> io::Result<()> {
+    match fs::remove_file(lock_path_in(locks_dir, &resolve_absolute(path))) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// Check the first 8KB for null bytes → likely binary.
@@ -119,40 +341,107 @@ pub fn file_size(path: &Path) -> io::Result<u64> {
 }
 
 /// File modification time, or None if unavailable.
-pub fn file_modification_time(path: &Path) -> Option<std::time::SystemTime> {
+pub fn file_modification_time(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).ok()?.modified().ok()
 }
 
 // -- persistent undo history ------------------------------------------------
 //
 // All undo histories stored in a single file: ~/.config/e/undo.bin
-// Format: [magic][version][entry_count] then length-prefixed entries.
+// Format: [magic][version][entry_count] then length-prefixed entries. Each
+// entry starts with the file path, the file's mtime, and the byte length of the
+// text the history applies to; a history is restored only when all three match,
+// because its byte offsets mean nothing against any other content.
 // On save, non-matching entries are copied as raw bytes (no deserialization).
 // On load, entries are scanned linearly; only the matching one is deserialized.
 
 const UNDO_MAGIC: &[u8; 4] = b"eUND";
-const UNDO_VERSION: u8 = 2;
+const UNDO_VERSION: u8 = 3;
 const MAX_GROUPS: u32 = 100_000;
 const MAX_ENTRIES: u32 = 10_000;
 
-fn undo_db_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".config/e/undo.bin")
+fn undo_db_path() -> io::Result<PathBuf> {
+    Ok(state_dir()?.join("undo.bin"))
 }
 
-/// Acquire an exclusive lock on an open file. Returns false if it fails.
-fn flock_exclusive(file: &fs::File) -> bool {
-    file.lock().is_ok()
+/// Sidecar file whose `flock` serializes access to a database. The database
+/// itself is replaced by rename, so a lock on it would be lost with its inode.
+fn db_lock_path(db_path: &Path) -> PathBuf {
+    let mut name = db_path.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
 }
 
-/// Acquire a shared lock on an open file.
-fn flock_shared(file: &fs::File) {
-    let _ = file.lock_shared();
+/// Rewrite a database under an exclusive lock: `build` receives the current
+/// bytes (empty when there is no database yet) and returns the new contents,
+/// which replace the file atomically so a crash never leaves a torn database.
+fn rewrite_db(db_path: &Path, build: impl FnOnce(&[u8]) -> io::Result<Vec<u8>>) -> io::Result<()> {
+    if let Some(parent) = db_path.parent() {
+        create_private_dir(parent)?;
+    }
+    let lock_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(db_lock_path(db_path))?;
+    lock_file.lock()?;
+    let existing = match fs::read(db_path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    let contents = build(&existing)?;
+    let mut staged_name = db_path.as_os_str().to_owned();
+    staged_name.push(".tmp");
+    let staged = PathBuf::from(staged_name);
+    let written = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&staged)?;
+        file.write_all(&contents)?;
+        file.sync_all()?;
+        fs::rename(&staged, db_path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    written
 }
 
-/// Release lock on an open file.
-fn flock_unlock(file: &fs::File) {
-    let _ = file.unlock();
+/// Read a database under a shared lock. `Ok(None)` when none exists. Writers
+/// create the lock file before the database, so a missing lock file means no
+/// writer has ever run and there is nothing to race with.
+fn read_db(db_path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let _lock = match fs::File::open(db_lock_path(db_path)) {
+        Ok(file) => {
+            file.lock_shared()?;
+            Some(file)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    match fs::read(db_path) {
+        Ok(data) => Ok(Some(data)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Refuse to replace a database written by a newer version of the editor: an
+/// older binary would otherwise destroy history it cannot read. Anything else
+/// (missing, foreign, or older) is replaced.
+fn check_db_not_newer(existing: &[u8], magic: &[u8; 4], version: u8) -> io::Result<()> {
+    if existing.len() > 4 && &existing[0..4] == magic && existing[4] > version {
+        return Err(io::Error::other(
+            "state file was written by a newer version of e; not overwriting it",
+        ));
+    }
+    Ok(())
 }
 
 // Binary encoding helpers
@@ -322,37 +611,53 @@ fn deserialize_groups(data: &[u8], pos: &mut usize) -> Option<Vec<UndoGroup>> {
     Some(groups)
 }
 
-/// Peek at the path and mtime fields at the start of an entry body.
-/// Returns `(path_bytes, mtime_secs, mtime_nanos)`.
-fn entry_header(data: &[u8], entry_start: usize) -> Option<(&[u8], i64, u32)> {
-    let mut p = entry_start;
-    let path_len = read_u32(data, &mut p)? as usize;
-    if p + path_len > data.len() {
-        return None;
-    }
-    let path = &data[p..p + path_len];
-    p += path_len;
-    let secs = read_i64(data, &mut p)?;
-    let nanos = read_u32(data, &mut p)?;
-    Some((path, secs, nanos))
+/// Identity of the file content an undo entry applies to.
+struct EntryHeader<'a> {
+    path: &'a [u8],
+    mtime_secs: i64,
+    mtime_nanos: u32,
+    file_len: u64,
 }
 
-/// Check if an entry's mtime still matches the file on disk.
-fn entry_mtime_valid(path: &[u8], stored_secs: i64, stored_nanos: u32) -> bool {
-    let path_str = std::str::from_utf8(path).ok();
-    let Some(path_str) = path_str else {
+/// Read the header fields at the start of an entry body, leaving `pos` just
+/// past them at the serialized undo and redo stacks.
+fn read_entry_header<'a>(data: &'a [u8], pos: &mut usize) -> Option<EntryHeader<'a>> {
+    let path_len = read_u32(data, pos)? as usize;
+    if *pos + path_len > data.len() {
+        return None;
+    }
+    let path = &data[*pos..*pos + path_len];
+    *pos += path_len;
+    let mtime_secs = read_i64(data, pos)?;
+    let mtime_nanos = read_u32(data, pos)?;
+    let file_len = read_u64(data, pos)?;
+    Some(EntryHeader {
+        path,
+        mtime_secs,
+        mtime_nanos,
+        file_len,
+    })
+}
+
+fn mtime_parts(mtime: SystemTime) -> (i64, u32) {
+    let duration = mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    (duration.as_secs() as i64, duration.subsec_nanos())
+}
+
+/// Check if an entry still describes the file on disk.
+fn entry_matches_disk(header: &EntryHeader) -> bool {
+    let Ok(path) = std::str::from_utf8(header.path) else {
         return false;
     };
-    let Ok(meta) = fs::metadata(path_str) else {
+    let Ok(meta) = fs::metadata(path) else {
         return false; // file deleted
     };
     let Ok(mtime) = meta.modified() else {
         return false;
     };
-    let duration = mtime
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    stored_secs == duration.as_secs() as i64 && stored_nanos == duration.subsec_nanos()
+    mtime_parts(mtime) == (header.mtime_secs, header.mtime_nanos) && meta.len() == header.file_len
 }
 
 /// Scan entries in a db blob, collecting raw byte ranges of entries whose path
@@ -378,9 +683,10 @@ fn collect_kept_entries<'a>(data: &'a [u8], exclude_path: &[u8]) -> (Vec<&'a [u8
         }
         let entry_body = &data[pos..pos + entry_len];
         pos += entry_len;
-        if let Some((path, secs, nanos)) = entry_header(data, pos - entry_len)
-            && path != exclude_path
-            && entry_mtime_valid(path, secs, nanos)
+        let mut header_pos = pos - entry_len;
+        if let Some(header) = read_entry_header(data, &mut header_pos)
+            && header.path != exclude_path
+            && entry_matches_disk(&header)
         {
             kept.push(entry_body);
         }
@@ -389,133 +695,132 @@ fn collect_kept_entries<'a>(data: &'a [u8], exclude_path: &[u8]) -> (Vec<&'a [u8
     (kept, kept_count)
 }
 
-/// Save undo history to disk. Errors are silently ignored.
-pub fn save_undo_history(file_path: &Path, undo_stack: &UndoStack) {
-    let _ = save_undo_history_to(&undo_db_path(), file_path, undo_stack);
+/// Save undo history to disk. `file_len` is the byte length of the text the
+/// history applies to; it must equal the file's length on disk, so callers
+/// persist only when the buffer and the file hold the same bytes.
+pub fn save_undo_history(
+    file_path: &Path,
+    undo_stack: &UndoStack,
+    file_len: u64,
+) -> io::Result<()> {
+    save_undo_history_to(&undo_db_path()?, file_path, undo_stack, file_len)
 }
 
-fn save_undo_history_to(db_path: &Path, file_path: &Path, undo_stack: &UndoStack) -> Option<()> {
+fn save_undo_history_to(
+    db_path: &Path,
+    file_path: &Path,
+    undo_stack: &UndoStack,
+    file_len: u64,
+) -> io::Result<()> {
     let abs_path = resolve_absolute(file_path);
     let abs_str = abs_path.to_string_lossy();
     let path_bytes = abs_str.as_bytes();
 
-    let meta = fs::metadata(file_path).ok()?;
-    let mtime = meta.modified().ok()?;
-    let duration = mtime
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    let (mtime_secs, mtime_nanos) = mtime_parts(fs::metadata(file_path)?.modified()?);
 
-    // Serialize new entry body
+    // Serialize new entry body. Load rejects stacks past these limits, so the
+    // oldest groups are dropped here instead of writing an unreadable entry.
     let mut entry = Vec::new();
     write_u32(&mut entry, path_bytes.len() as u32);
     entry.extend_from_slice(path_bytes);
-    write_i64(&mut entry, duration.as_secs() as i64);
-    write_u32(&mut entry, duration.subsec_nanos());
+    write_i64(&mut entry, mtime_secs);
+    write_u32(&mut entry, mtime_nanos);
+    write_u64(&mut entry, file_len);
     let (undo, redo) = undo_stack.stacks();
-    write_u32(&mut entry, undo.len() as u32);
-    for group in undo {
-        serialize_group(&mut entry, group);
+    for stack in [undo, redo] {
+        let stack = &stack[stack.len().saturating_sub(MAX_GROUPS as usize)..];
+        write_u32(&mut entry, stack.len() as u32);
+        for group in stack {
+            if group.operations.len() > MAX_GROUPS as usize
+                || group.carets_before.selections.len() > MAX_GROUPS as usize
+                || group.carets_after.selections.len() > MAX_GROUPS as usize
+            {
+                return Err(io::Error::other("undo group too large to persist"));
+            }
+            serialize_group(&mut entry, group);
+        }
     }
-    write_u32(&mut entry, redo.len() as u32);
-    for group in redo {
-        serialize_group(&mut entry, group);
-    }
-
-    // Ensure parent dir exists, open db file, lock it
-    if let Some(parent) = db_path.parent() {
-        fs::create_dir_all(parent).ok()?;
-    }
-    let lock_file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(db_path)
-        .ok()?;
-    if !flock_exclusive(&lock_file) {
-        return None;
+    if u32::try_from(entry.len()).is_err() {
+        return Err(io::Error::other("undo history too large to persist"));
     }
 
-    // Read existing db under lock, keep fresh entries for other paths
-    let existing = fs::read(db_path).unwrap_or_default();
-    let (kept, kept_count) = collect_kept_entries(&existing, path_bytes);
+    rewrite_db(db_path, |existing| {
+        check_db_not_newer(existing, UNDO_MAGIC, UNDO_VERSION)?;
+        // Keep fresh entries for other paths, newest last, within the load limit.
+        let (kept, _) = collect_kept_entries(existing, path_bytes);
+        let kept = &kept[kept.len().saturating_sub(MAX_ENTRIES as usize - 1)..];
 
-    // Write new db
-    let mut buf = Vec::new();
-    buf.extend_from_slice(UNDO_MAGIC);
-    write_u8(&mut buf, UNDO_VERSION);
-    write_u32(&mut buf, kept_count + 1);
-    for entry_body in &kept {
-        write_u32(&mut buf, entry_body.len() as u32);
-        buf.extend_from_slice(entry_body);
-    }
-    write_u32(&mut buf, entry.len() as u32);
-    buf.extend_from_slice(&entry);
-
-    fs::write(db_path, &buf).ok()?;
-    flock_unlock(&lock_file);
-    Some(())
+        let mut buf = Vec::new();
+        buf.extend_from_slice(UNDO_MAGIC);
+        write_u8(&mut buf, UNDO_VERSION);
+        write_u32(&mut buf, kept.len() as u32 + 1);
+        for entry_body in kept {
+            write_u32(&mut buf, entry_body.len() as u32);
+            buf.extend_from_slice(entry_body);
+        }
+        write_u32(&mut buf, entry.len() as u32);
+        buf.extend_from_slice(&entry);
+        Ok(buf)
+    })
 }
 
-/// Load undo history from disk. Errors and mtime mismatches silently ignored.
-pub fn load_undo_history(file_path: &Path, undo_stack: &mut UndoStack) {
-    let _ = load_undo_history_from(&undo_db_path(), file_path, undo_stack);
+/// Load undo history from disk. A missing database or a history for different
+/// file content (mtime or length mismatch) leaves `undo_stack` untouched.
+/// `buffer_len` is the byte length of the text just loaded into the buffer.
+pub fn load_undo_history(
+    file_path: &Path,
+    undo_stack: &mut UndoStack,
+    buffer_len: u64,
+) -> io::Result<()> {
+    load_undo_history_from(&undo_db_path()?, file_path, undo_stack, buffer_len)
 }
 
 fn load_undo_history_from(
     db_path: &Path,
     file_path: &Path,
     undo_stack: &mut UndoStack,
+    buffer_len: u64,
+) -> io::Result<()> {
+    if let Some(data) = read_db(db_path)? {
+        restore_undo_entry(&data, file_path, undo_stack, buffer_len);
+    }
+    Ok(())
+}
+
+fn restore_undo_entry(
+    data: &[u8],
+    file_path: &Path,
+    undo_stack: &mut UndoStack,
+    buffer_len: u64,
 ) -> Option<()> {
     let abs_path = resolve_absolute(file_path);
     let abs_str = abs_path.to_string_lossy();
     let target_path = abs_str.as_bytes();
 
-    // Shared lock to prevent reading a half-written file
-    let lock_file = fs::File::open(db_path).ok()?;
-    flock_shared(&lock_file);
-    let data = fs::read(db_path).ok()?;
     if data.len() < 9 || &data[0..4] != UNDO_MAGIC {
         return None;
     }
     let mut pos = 4usize;
-    let version = read_u8(&data, &mut pos)?;
+    let version = read_u8(data, &mut pos)?;
     if version != UNDO_VERSION {
         return None;
     }
 
-    let count = read_u32(&data, &mut pos)?;
+    let count = read_u32(data, &mut pos)?;
     for _ in 0..count.min(MAX_ENTRIES) {
-        let entry_len = read_u32(&data, &mut pos)? as usize;
+        let entry_len = read_u32(data, &mut pos)? as usize;
         let entry_start = pos;
         if pos + entry_len > data.len() {
             return None;
         }
 
-        // Read path
-        let path_len = read_u32(&data, &mut pos)? as usize;
-        if pos + path_len > data.len() {
-            return None;
-        }
-        let entry_path = &data[pos..pos + path_len];
-        pos += path_len;
-
-        if entry_path == target_path {
-            // Mtime check
-            let stored_secs = read_i64(&data, &mut pos)?;
-            let stored_nanos = read_u32(&data, &mut pos)?;
-
-            let meta = fs::metadata(file_path).ok()?;
-            let mtime = meta.modified().ok()?;
-            let duration = mtime
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
-            if stored_secs != duration.as_secs() as i64 || stored_nanos != duration.subsec_nanos() {
+        let header = read_entry_header(data, &mut pos)?;
+        if header.path == target_path {
+            if header.file_len != buffer_len || !entry_matches_disk(&header) {
                 return None;
             }
-
-            let undo = deserialize_groups(&data, &mut pos)?;
-            let redo = deserialize_groups(&data, &mut pos)?;
+            let undo = deserialize_groups(data, &mut pos)?;
+            let redo = deserialize_groups(data, &mut pos)?;
             undo_stack.restore(undo, redo);
             return Some(());
         }
@@ -538,17 +843,20 @@ const CURSOR_MAGIC: &[u8; 4] = b"eCUR";
 const CURSOR_VERSION: u8 = 1;
 const CURSOR_MAX_ENTRIES: u32 = 10_000;
 
-fn cursor_db_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".config/e/cursor.bin")
+fn cursor_db_path() -> io::Result<PathBuf> {
+    Ok(state_dir()?.join("cursor.bin"))
 }
 
-/// Save cursor position for a file. Errors silently ignored.
-pub fn save_cursor_position(file_path: &Path, cursor: TextPosition) {
-    let _ = save_cursor_position_to(&cursor_db_path(), file_path, cursor);
+/// Save cursor position for a file.
+pub fn save_cursor_position(file_path: &Path, cursor: TextPosition) -> io::Result<()> {
+    save_cursor_position_to(&cursor_db_path()?, file_path, cursor)
 }
 
-fn save_cursor_position_to(db_path: &Path, file_path: &Path, cursor: TextPosition) -> Option<()> {
+fn save_cursor_position_to(
+    db_path: &Path,
+    file_path: &Path,
+    cursor: TextPosition,
+) -> io::Result<()> {
     let abs_path = resolve_absolute(file_path);
     let abs_str = abs_path.to_string_lossy();
     let path_bytes = abs_str.as_bytes();
@@ -560,71 +868,54 @@ fn save_cursor_position_to(db_path: &Path, file_path: &Path, cursor: TextPositio
     write_u32(&mut entry, cursor.line as u32);
     write_u32(&mut entry, cursor.column as u32);
 
-    // Ensure parent dir, open db, lock
-    if let Some(parent) = db_path.parent() {
-        fs::create_dir_all(parent).ok()?;
-    }
-    let lock_file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(db_path)
-        .ok()?;
-    if !flock_exclusive(&lock_file) {
-        return None;
-    }
+    rewrite_db(db_path, |existing| {
+        check_db_not_newer(existing, CURSOR_MAGIC, CURSOR_VERSION)?;
+        // Keep entries for other paths (prune deleted files)
+        let kept = collect_cursor_entries(existing, path_bytes);
+        let kept = &kept[kept.len().saturating_sub(CURSOR_MAX_ENTRIES as usize - 1)..];
 
-    // Read existing, keep entries for other paths (prune deleted files)
-    let existing = fs::read(db_path).unwrap_or_default();
-    let kept = collect_cursor_entries(&existing, path_bytes);
-
-    // Write new db
-    let mut buf = Vec::new();
-    buf.extend_from_slice(CURSOR_MAGIC);
-    write_u8(&mut buf, CURSOR_VERSION);
-    write_u32(&mut buf, kept.len() as u32 + 1);
-    for e in &kept {
-        buf.extend_from_slice(e);
-    }
-    // Length-prefix our new entry
-    write_u32(&mut buf, entry.len() as u32);
-    buf.extend_from_slice(&entry);
-
-    fs::write(db_path, &buf).ok()?;
-    flock_unlock(&lock_file);
-    Some(())
+        let mut buf = Vec::new();
+        buf.extend_from_slice(CURSOR_MAGIC);
+        write_u8(&mut buf, CURSOR_VERSION);
+        write_u32(&mut buf, kept.len() as u32 + 1);
+        for e in kept {
+            buf.extend_from_slice(e);
+        }
+        // Length-prefix our new entry
+        write_u32(&mut buf, entry.len() as u32);
+        buf.extend_from_slice(&entry);
+        Ok(buf)
+    })
 }
 
 /// Load cursor position for a file. Returns None if not found.
 pub fn load_cursor_position(file_path: &Path) -> Option<TextPosition> {
-    load_cursor_position_from(&cursor_db_path(), file_path)
+    load_cursor_position_from(&cursor_db_path().ok()?, file_path)
 }
 
 fn load_cursor_position_from(db_path: &Path, file_path: &Path) -> Option<TextPosition> {
+    let data = read_db(db_path).ok()??;
+    let data = data.as_slice();
     let abs_path = resolve_absolute(file_path);
     let abs_str = abs_path.to_string_lossy();
     let target_path = abs_str.as_bytes();
 
-    let lock_file = fs::File::open(db_path).ok()?;
-    flock_shared(&lock_file);
-    let data = fs::read(db_path).ok()?;
     if data.len() < 9 || &data[0..4] != CURSOR_MAGIC {
         return None;
     }
     let mut pos = 4usize;
-    let version = read_u8(&data, &mut pos)?;
+    let version = read_u8(data, &mut pos)?;
     if version != CURSOR_VERSION {
         return None;
     }
-    let count = read_u32(&data, &mut pos)?;
+    let count = read_u32(data, &mut pos)?;
     for _ in 0..count.min(CURSOR_MAX_ENTRIES) {
-        let entry_len = read_u32(&data, &mut pos)? as usize;
+        let entry_len = read_u32(data, &mut pos)? as usize;
         let entry_start = pos;
         if pos + entry_len > data.len() {
             return None;
         }
-        let path_len = read_u32(&data, &mut pos)? as usize;
+        let path_len = read_u32(data, &mut pos)? as usize;
         if pos + path_len > data.len() {
             return None;
         }
@@ -632,8 +923,8 @@ fn load_cursor_position_from(db_path: &Path, file_path: &Path) -> Option<TextPos
         pos += path_len;
 
         if entry_path == target_path {
-            let line = read_u32(&data, &mut pos)? as usize;
-            let column = read_u32(&data, &mut pos)? as usize;
+            let line = read_u32(data, &mut pos)? as usize;
+            let column = read_u32(data, &mut pos)? as usize;
             return Some(TextPosition::new(line, column));
         }
         pos = entry_start + entry_len;
@@ -695,49 +986,49 @@ mod tests {
     use super::*;
     use crate::selection::Selection;
 
-    // -- strip_trailing_whitespace_and_ensure_newline -----------------------
+    // -- clean_for_write ----------------------------------------------------
 
     #[test]
     fn test_strip_trailing_whitespace() {
-        let result = strip_trailing_whitespace_and_ensure_newline(b"hello   \nworld  \n");
+        let result = clean_for_write(b"hello   \nworld  \n");
         assert_eq!(result, b"hello\nworld\n");
     }
 
     #[test]
     fn test_ensure_trailing_newline() {
-        let result = strip_trailing_whitespace_and_ensure_newline(b"hello");
+        let result = clean_for_write(b"hello");
         assert_eq!(result, b"hello\n");
     }
 
     #[test]
     fn test_already_has_trailing_newline() {
-        let result = strip_trailing_whitespace_and_ensure_newline(b"hello\n");
+        let result = clean_for_write(b"hello\n");
         assert_eq!(result, b"hello\n");
     }
 
     #[test]
     fn test_strip_tabs_at_end() {
-        let result = strip_trailing_whitespace_and_ensure_newline(b"hello\t\t\n");
+        let result = clean_for_write(b"hello\t\t\n");
         assert_eq!(result, b"hello\n");
     }
 
     #[test]
     fn test_preserves_leading_whitespace() {
-        let result = strip_trailing_whitespace_and_ensure_newline(b"  hello\n");
+        let result = clean_for_write(b"  hello\n");
         assert_eq!(result, b"  hello\n");
     }
 
     #[test]
     fn test_empty_lines_preserved() {
-        let result = strip_trailing_whitespace_and_ensure_newline(b"a\n\nb\n");
+        let result = clean_for_write(b"a\n\nb\n");
         assert_eq!(result, b"a\n\nb\n");
     }
 
     #[test]
     fn test_only_whitespace_lines() {
-        // All-whitespace lines get trimmed to empty; the function produces a single trailing newline
-        let result = strip_trailing_whitespace_and_ensure_newline(b"   \n  \n");
-        assert_eq!(result, b"\n");
+        // Blank lines are kept, including leading ones.
+        let result = clean_for_write(b"   \n  \n");
+        assert_eq!(result, b"\n\n");
     }
 
     // -- is_likely_binary ---------------------------------------------------
@@ -778,30 +1069,88 @@ mod tests {
 
     // -- read_file / write_file (integration) -------------------------------
 
+    fn save_cleaned(path: &Path, data: &[u8]) -> io::Result<()> {
+        write_file(
+            path,
+            &clean_for_write(data),
+            file_modification_time(path),
+        )
+    }
+
+    #[test]
+    fn test_clean_for_write_preserves_invalid_utf8_crlf_and_nbsp() {
+        let data = b"a\xff\xfeb\r\nline2\xc2\xa0\r\ntail  \t\r\n";
+        assert_eq!(
+            clean_for_write(data),
+            b"a\xff\xfeb\r\nline2\xc2\xa0\r\ntail\r\n"
+        );
+    }
+
     #[test]
     fn test_read_write_roundtrip() {
-        let dir = std::env::temp_dir().join("e_test_roundtrip");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("roundtrip");
         let path = dir.join("test.txt");
 
-        let data = b"hello\nworld\n";
-        write_file(&path, data).unwrap();
-
-        let read_back = read_file(&path).unwrap();
-        assert_eq!(read_back, b"hello\nworld\n");
+        save_cleaned(&path, b"hello\nworld\n").unwrap();
+        assert_eq!(read_file(&path).unwrap(), b"hello\nworld\n");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn test_write_strips_trailing_whitespace() {
-        let dir = std::env::temp_dir().join("e_test_strip");
-        let _ = fs::create_dir_all(&dir);
+    fn test_write_refuses_file_created_since_load() {
+        let dir = scratch_dir("write_created");
         let path = dir.join("test.txt");
+        fs::write(&path, b"theirs\n").unwrap();
 
-        write_file(&path, b"hello   \nworld  ").unwrap();
-        let read_back = fs::read(&path).unwrap();
-        assert_eq!(read_back, b"hello\nworld\n");
+        assert!(write_file(&path, b"mine\n", None).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"theirs\n");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_keeps_mode_and_follows_symlink() {
+        let dir = scratch_dir("write_symlink");
+        let real = dir.join("real.txt");
+        let link = dir.join("link.txt");
+        fs::write(&real, b"old\n").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        save_cleaned(&link, b"new\n").unwrap();
+
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(fs::read(&real).unwrap(), b"new\n");
+        assert_eq!(fs::metadata(&real).unwrap().mode() & 0o7777, 0o640);
+        let leftovers: Vec<_> = fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(leftovers.len(), 2, "temporary file left behind");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_hard_linked_file_stays_linked() {
+        let dir = scratch_dir("write_hardlink");
+        let path = dir.join("a.txt");
+        let other = dir.join("b.txt");
+        fs::write(&path, b"old\n").unwrap();
+        fs::hard_link(&path, &other).unwrap();
+
+        save_cleaned(&path, b"new\n").unwrap();
+
+        assert_eq!(fs::read(&other).unwrap(), b"new\n");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_creates_new_file() {
+        let dir = scratch_dir("write_new");
+        let path = dir.join("fresh.txt");
+
+        write_file(&path, b"hi\n", None).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"hi\n");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -825,6 +1174,18 @@ mod tests {
             selections: vec![Selection::caret(pos)],
             primary: 0,
         }
+    }
+
+    /// The tests' files are written before saving, so the history applies to
+    /// whatever length the file has on disk.
+    fn save_for_test(db: &Path, path: &Path, stack: &UndoStack) {
+        let len = fs::metadata(path).unwrap().len();
+        save_undo_history_to(db, path, stack, len).unwrap();
+    }
+
+    fn load_for_test(db: &Path, path: &Path, stack: &mut UndoStack) {
+        let len = fs::metadata(path).unwrap().len();
+        load_undo_history_from(db, path, stack, len).unwrap();
     }
 
     fn make_test_stack() -> UndoStack {
@@ -859,10 +1220,10 @@ mod tests {
         fs::write(&path, b"hel").unwrap();
 
         let stack = make_test_stack();
-        save_undo_history_to(&db, &path, &stack);
+        save_for_test(&db, &path, &stack);
 
         let mut loaded = UndoStack::new();
-        load_undo_history_from(&db, &path, &mut loaded);
+        load_for_test(&db, &path, &mut loaded);
         let (undo, redo) = loaded.stacks();
         assert_eq!(undo.len(), 2);
         assert!(redo.is_empty());
@@ -886,10 +1247,10 @@ mod tests {
 
         let mut stack = make_test_stack();
         stack.undo(|_| {});
-        save_undo_history_to(&db, &path, &stack);
+        save_for_test(&db, &path, &stack);
 
         let mut loaded = UndoStack::new();
-        load_undo_history_from(&db, &path, &mut loaded);
+        load_for_test(&db, &path, &mut loaded);
         let (undo, redo) = loaded.stacks();
         assert_eq!(undo.len(), 1);
         assert_eq!(redo.len(), 1);
@@ -906,16 +1267,58 @@ mod tests {
         fs::write(&path, b"hello").unwrap();
 
         let stack = make_test_stack();
-        save_undo_history_to(&db, &path, &stack);
+        save_for_test(&db, &path, &stack);
 
         std::thread::sleep(std::time::Duration::from_millis(50));
         fs::write(&path, b"changed").unwrap();
 
         let mut loaded = UndoStack::new();
-        load_undo_history_from(&db, &path, &mut loaded);
+        load_for_test(&db, &path, &mut loaded);
         let (undo, redo) = loaded.stacks();
         assert!(undo.is_empty());
         assert!(redo.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_undo_history_rejects_different_buffer_length() {
+        let dir = scratch_dir("undo_len");
+        let path = dir.join("test.txt");
+        let db = dir.join("undo.bin");
+        fs::write(&path, b"abc   \nxyz").unwrap();
+
+        // Saved after a cleaned save: offsets refer to a longer buffer than
+        // the file now holds, with the mtime unchanged.
+        save_undo_history_to(&db, &path, &make_test_stack(), 10).unwrap();
+
+        let mut loaded = UndoStack::new();
+        load_undo_history_from(&db, &path, &mut loaded, 7).unwrap();
+        assert!(loaded.stacks().0.is_empty());
+        load_undo_history_from(&db, &path, &mut loaded, 10).unwrap();
+        assert_eq!(
+            loaded.stacks().0.len(),
+            make_test_stack().stacks().0.len()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_undo_history_save_keeps_database_of_newer_version() {
+        let dir = scratch_dir("undo_newer");
+        let path = dir.join("test.txt");
+        let db = dir.join("undo.bin");
+        fs::write(&path, b"hello").unwrap();
+        let mut newer = Vec::new();
+        newer.extend_from_slice(UNDO_MAGIC);
+        newer.push(UNDO_VERSION + 1);
+        newer.extend_from_slice(b"future payload");
+        fs::write(&db, &newer).unwrap();
+
+        let err = save_undo_history_to(&db, &path, &make_test_stack(), 5).unwrap_err();
+        assert!(err.to_string().contains("newer version"));
+        assert_eq!(fs::read(&db).unwrap(), newer);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -930,7 +1333,7 @@ mod tests {
         fs::write(&db, b"garbage data here").unwrap();
 
         let mut loaded = UndoStack::new();
-        load_undo_history_from(&db, &path, &mut loaded);
+        load_for_test(&db, &path, &mut loaded);
         let (undo, redo) = loaded.stacks();
         assert!(undo.is_empty());
         assert!(redo.is_empty());
@@ -947,10 +1350,10 @@ mod tests {
         fs::write(&path, b"hello").unwrap();
 
         let stack = UndoStack::new();
-        save_undo_history_to(&db, &path, &stack);
+        save_for_test(&db, &path, &stack);
 
         let mut loaded = UndoStack::new();
-        load_undo_history_from(&db, &path, &mut loaded);
+        load_for_test(&db, &path, &mut loaded);
         let (undo, redo) = loaded.stacks();
         assert!(undo.is_empty());
         assert!(redo.is_empty());
@@ -968,7 +1371,7 @@ mod tests {
         fs::write(&db, b"BADMagic").unwrap();
 
         let mut loaded = UndoStack::new();
-        load_undo_history_from(&db, &path, &mut loaded);
+        load_for_test(&db, &path, &mut loaded);
         let (undo, redo) = loaded.stacks();
         assert!(undo.is_empty());
         assert!(redo.is_empty());
@@ -990,7 +1393,7 @@ mod tests {
         fs::write(&db, &data).unwrap();
 
         let mut loaded = UndoStack::new();
-        load_undo_history_from(&db, &path, &mut loaded);
+        load_for_test(&db, &path, &mut loaded);
         let (undo, redo) = loaded.stacks();
         assert!(undo.is_empty());
         assert!(redo.is_empty());
@@ -1009,7 +1412,7 @@ mod tests {
         fs::write(&path_b, b"bbb").unwrap();
 
         let stack_a = make_test_stack();
-        save_undo_history_to(&db, &path_a, &stack_a);
+        save_for_test(&db, &path_a, &stack_a);
 
         let mut stack_b = UndoStack::new();
         stack_b.record(
@@ -1021,15 +1424,15 @@ mod tests {
             snap(TextPosition::new(0, 1)),
         );
         stack_b.seal();
-        save_undo_history_to(&db, &path_b, &stack_b);
+        save_for_test(&db, &path_b, &stack_b);
 
         // Both should be independently loadable
         let mut loaded_a = UndoStack::new();
-        load_undo_history_from(&db, &path_a, &mut loaded_a);
+        load_for_test(&db, &path_a, &mut loaded_a);
         assert_eq!(loaded_a.stacks().0.len(), 2);
 
         let mut loaded_b = UndoStack::new();
-        load_undo_history_from(&db, &path_b, &mut loaded_b);
+        load_for_test(&db, &path_b, &mut loaded_b);
         assert_eq!(loaded_b.stacks().0.len(), 1);
 
         let _ = fs::remove_dir_all(&dir);
@@ -1044,7 +1447,7 @@ mod tests {
         fs::write(&path, b"hello").unwrap();
 
         let stack = make_test_stack();
-        save_undo_history_to(&db, &path, &stack);
+        save_for_test(&db, &path, &stack);
 
         // Save again with different stack — should replace, not duplicate
         let mut stack2 = UndoStack::new();
@@ -1057,10 +1460,10 @@ mod tests {
             snap(TextPosition::new(0, 1)),
         );
         stack2.seal();
-        save_undo_history_to(&db, &path, &stack2);
+        save_for_test(&db, &path, &stack2);
 
         let mut loaded = UndoStack::new();
-        load_undo_history_from(&db, &path, &mut loaded);
+        load_for_test(&db, &path, &mut loaded);
         assert_eq!(loaded.stacks().0.len(), 1); // new stack, not old
 
         let _ = fs::remove_dir_all(&dir);
@@ -1078,8 +1481,8 @@ mod tests {
 
         // Save undo for both files
         let stack = make_test_stack();
-        save_undo_history_to(&db, &path_a, &stack);
-        save_undo_history_to(&db, &path_b, &stack);
+        save_for_test(&db, &path_a, &stack);
+        save_for_test(&db, &path_b, &stack);
         let size_before = fs::metadata(&db).unwrap().len();
 
         // Externally modify file_a (invalidates its mtime)
@@ -1087,7 +1490,7 @@ mod tests {
         fs::write(&path_a, b"modified").unwrap();
 
         // Save file_b again — should prune file_a's stale entry
-        save_undo_history_to(&db, &path_b, &stack);
+        save_for_test(&db, &path_b, &stack);
         let size_after = fs::metadata(&db).unwrap().len();
         assert!(
             size_after < size_before,
@@ -1096,12 +1499,12 @@ mod tests {
 
         // file_a's entry should be gone
         let mut loaded = UndoStack::new();
-        load_undo_history_from(&db, &path_a, &mut loaded);
+        load_for_test(&db, &path_a, &mut loaded);
         assert!(loaded.stacks().0.is_empty());
 
         // file_b's entry should still work
         let mut loaded_b = UndoStack::new();
-        load_undo_history_from(&db, &path_b, &mut loaded_b);
+        load_for_test(&db, &path_b, &mut loaded_b);
         assert_eq!(loaded_b.stacks().0.len(), 2);
 
         let _ = fs::remove_dir_all(&dir);
@@ -1118,39 +1521,48 @@ mod tests {
         fs::write(&path_b, b"bbb").unwrap();
 
         let stack = make_test_stack();
-        save_undo_history_to(&db, &path_a, &stack);
-        save_undo_history_to(&db, &path_b, &stack);
+        save_for_test(&db, &path_a, &stack);
+        save_for_test(&db, &path_b, &stack);
 
         // Delete file_a
         fs::remove_file(&path_a).unwrap();
 
         // Saving file_b should prune the deleted file_a entry
-        save_undo_history_to(&db, &path_b, &stack);
+        save_for_test(&db, &path_b, &stack);
 
         // Re-create file_a — its old undo entry should be gone
         fs::write(&path_a, b"aaa").unwrap();
         let mut loaded = UndoStack::new();
-        load_undo_history_from(&db, &path_a, &mut loaded);
+        load_for_test(&db, &path_a, &mut loaded);
         assert!(loaded.stacks().0.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
     }
 
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("e_test_{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
-    fn test_acquire_release_lock() {
-        let dir = std::env::temp_dir().join("e_test_lock");
-        let _ = fs::create_dir_all(&dir);
+    fn test_break_lock_replaces_holder_and_old_drop_keeps_new_lock() {
+        let dir = scratch_dir("lock_break");
+        let locks = dir.join("locks");
+        fs::create_dir_all(&locks).unwrap();
         let path = dir.join("test.txt");
         fs::write(&path, b"hello").unwrap();
 
-        // Acquire should succeed
-        assert!(acquire_lock(&path).is_ok());
-        // Second acquire should fail (lock exists)
-        assert!(acquire_lock(&path).is_err());
-        // Release and try again
-        release_lock(&path);
-        assert!(acquire_lock(&path).is_ok());
-        release_lock(&path);
+        let old = acquire_lock_in(&locks, &path).unwrap();
+        break_lock_in(&locks, &path).unwrap();
+        let new = acquire_lock_in(&locks, &path).unwrap();
+        drop(old);
+        assert!(matches!(
+            acquire_lock_in(&locks, &path),
+            Err(LockError::Held { .. })
+        ));
+        drop(new);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1178,7 +1590,7 @@ mod tests {
     #[test]
     fn test_lock_path_contains_elock() {
         let path = std::path::Path::new("/tmp/test.txt");
-        let lp = lock_path(path);
+        let lp = lock_path_in(Path::new("/state/locks"), path);
         let s = lp.to_string_lossy();
         assert!(s.ends_with(".elock"));
         assert!(s.contains("locks"));
@@ -1253,9 +1665,9 @@ mod tests {
     #[test]
     fn test_entry_header_truncated() {
         let data = [0u8; 4]; // Just a path length, no actual path
-        let result = entry_header(&data, 0);
-        // path_len = 0, then needs at least i64 + u32 = 12 more bytes → should fail
-        // Actually path_len from [0,0,0,0] is 0, so path is empty, then secs read fails
+        let mut pos = 0;
+        let result = read_entry_header(&data, &mut pos);
+        // path_len = 0, then the mtime and length fields are missing → should fail
         assert!(result.is_none());
     }
 
@@ -1268,7 +1680,7 @@ mod tests {
         fs::write(&path, b"hello").unwrap();
 
         let mut loaded = UndoStack::new();
-        load_undo_history_from(&db, &path, &mut loaded);
+        load_for_test(&db, &path, &mut loaded);
         let (undo, redo) = loaded.stacks();
         assert!(undo.is_empty());
         assert!(redo.is_empty());
@@ -1286,7 +1698,7 @@ mod tests {
         let db = dir.join("cursor.bin");
         fs::write(&path, b"hello\nworld\n").unwrap();
 
-        save_cursor_position_to(&db, &path, TextPosition::new(1, 3));
+        save_cursor_position_to(&db, &path, TextPosition::new(1, 3)).unwrap();
         let loaded = load_cursor_position_from(&db, &path);
         assert_eq!(loaded, Some(TextPosition::new(1, 3)));
 
@@ -1301,8 +1713,8 @@ mod tests {
         let db = dir.join("cursor.bin");
         fs::write(&path, b"hello").unwrap();
 
-        save_cursor_position_to(&db, &path, TextPosition::new(0, 2));
-        save_cursor_position_to(&db, &path, TextPosition::new(5, 10));
+        save_cursor_position_to(&db, &path, TextPosition::new(0, 2)).unwrap();
+        save_cursor_position_to(&db, &path, TextPosition::new(5, 10)).unwrap();
         let loaded = load_cursor_position_from(&db, &path);
         assert_eq!(loaded, Some(TextPosition::new(5, 10)));
 
@@ -1319,8 +1731,8 @@ mod tests {
         fs::write(&path_a, b"aaa").unwrap();
         fs::write(&path_b, b"bbb").unwrap();
 
-        save_cursor_position_to(&db, &path_a, TextPosition::new(0, 1));
-        save_cursor_position_to(&db, &path_b, TextPosition::new(3, 7));
+        save_cursor_position_to(&db, &path_a, TextPosition::new(0, 1)).unwrap();
+        save_cursor_position_to(&db, &path_b, TextPosition::new(3, 7)).unwrap();
 
         assert_eq!(
             load_cursor_position_from(&db, &path_a),
@@ -1357,14 +1769,14 @@ mod tests {
         fs::write(&path_a, b"aaa").unwrap();
         fs::write(&path_b, b"bbb").unwrap();
 
-        save_cursor_position_to(&db, &path_a, TextPosition::new(0, 1));
-        save_cursor_position_to(&db, &path_b, TextPosition::new(3, 7));
+        save_cursor_position_to(&db, &path_a, TextPosition::new(0, 1)).unwrap();
+        save_cursor_position_to(&db, &path_b, TextPosition::new(3, 7)).unwrap();
 
         // Delete file_a
         fs::remove_file(&path_a).unwrap();
 
         // Saving file_b should prune file_a's entry
-        save_cursor_position_to(&db, &path_b, TextPosition::new(4, 0));
+        save_cursor_position_to(&db, &path_b, TextPosition::new(4, 0)).unwrap();
 
         // Re-create file_a — old cursor entry should be gone
         fs::write(&path_a, b"aaa").unwrap();

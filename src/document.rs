@@ -218,45 +218,6 @@ impl Document {
         self.is_dirty = true;
     }
 
-    pub fn insert_at_byte_with_carets(
-        &mut self,
-        offset: usize,
-        bytes: &[u8],
-        carets_before: CaretSnapshot,
-        carets_after: CaretSnapshot,
-    ) {
-        self.buffer.insert(offset, bytes);
-        self.undo_stack.record(
-            UndoOperation::Insert {
-                byte_offset: offset,
-                bytes: Arc::from(bytes),
-            },
-            carets_before,
-            carets_after,
-        );
-        self.is_dirty = true;
-    }
-
-    pub fn delete_at_byte_with_carets(
-        &mut self,
-        offset: usize,
-        count: usize,
-        carets_before: CaretSnapshot,
-        carets_after: CaretSnapshot,
-    ) {
-        let deleted = self.buffer.slice(offset, offset + count);
-        self.buffer.delete(offset, count);
-        self.undo_stack.record(
-            UndoOperation::Delete {
-                byte_offset: offset,
-                bytes: Arc::from(deleted.as_slice()),
-            },
-            carets_before,
-            carets_after,
-        );
-        self.is_dirty = true;
-    }
-
     pub fn apply_batch(
         &mut self,
         edits: &[TextEdit],
@@ -274,15 +235,11 @@ impl Document {
                 .all(|window| window[0].end_byte <= window[1].start_byte)
         );
 
-        for edit in edits.iter().rev() {
-            if edit.end_byte > edit.start_byte {
-                self.buffer
-                    .delete(edit.start_byte, edit.end_byte - edit.start_byte);
-            }
-            if !edit.inserted_bytes.is_empty() {
-                self.buffer.insert(edit.start_byte, &edit.inserted_bytes);
-            }
-        }
+        self.buffer.replace_sorted(
+            edits
+                .iter()
+                .map(|edit| (edit.start_byte, edit.end_byte, edit.inserted_bytes.as_slice())),
+        );
 
         let carets_after = CaretSnapshot {
             selections: carets_after_offsets
@@ -299,30 +256,23 @@ impl Document {
             primary,
         };
 
-        self.undo_stack.begin_group();
+        let mut operations = Vec::with_capacity(edits.len());
         for edit in edits.iter().rev() {
             if !edit.deleted_bytes.is_empty() {
-                self.undo_stack.record(
-                    UndoOperation::Delete {
-                        byte_offset: edit.start_byte,
-                        bytes: Arc::from(edit.deleted_bytes.as_slice()),
-                    },
-                    carets_before.clone(),
-                    carets_after.clone(),
-                );
+                operations.push(UndoOperation::Delete {
+                    byte_offset: edit.start_byte,
+                    bytes: Arc::from(edit.deleted_bytes.as_slice()),
+                });
             }
             if !edit.inserted_bytes.is_empty() {
-                self.undo_stack.record(
-                    UndoOperation::Insert {
-                        byte_offset: edit.start_byte,
-                        bytes: Arc::from(edit.inserted_bytes.as_slice()),
-                    },
-                    carets_before.clone(),
-                    carets_after.clone(),
-                );
+                operations.push(UndoOperation::Insert {
+                    byte_offset: edit.start_byte,
+                    bytes: Arc::from(edit.inserted_bytes.as_slice()),
+                });
             }
         }
-        self.undo_stack.end_group();
+        self.undo_stack
+            .record_group(operations, carets_before.clone(), carets_after.clone());
         self.is_dirty = true;
         carets_after
     }
@@ -689,5 +639,41 @@ mod proptests {
 
             prop_assert_eq!(doc.buffer.contents(), original);
         }
+    }
+
+    #[test]
+    fn test_apply_batch_records_one_group_and_undoes_all_edits() {
+        let mut doc = Document::new(b"one\ntwo\nthree".to_vec(), None);
+        let before = CaretSnapshot {
+            selections: vec![
+                Selection::caret(TextPosition::new(0, 3)),
+                Selection::caret(TextPosition::new(2, 5)),
+            ],
+            primary: 0,
+        };
+        let edits = vec![
+            TextEdit {
+                start_byte: 3,
+                end_byte: 3,
+                inserted_bytes: b"!\nx".to_vec(),
+                deleted_bytes: Vec::new(),
+            },
+            TextEdit {
+                start_byte: 7,
+                end_byte: 13,
+                inserted_bytes: b"\n".to_vec(),
+                deleted_bytes: b"\nthree".to_vec(),
+            },
+        ];
+        let after = doc.apply_batch(&edits, &before, &[(4, 4), (11, 11)], 0);
+        assert_eq!(doc.buffer.contents(), b"one!\nx\ntwo\n");
+        assert_eq!(after.selections.len(), 2);
+        assert!(doc.is_dirty);
+
+        assert_eq!(doc.undo().unwrap(), before);
+        assert_eq!(doc.buffer.contents(), b"one\ntwo\nthree");
+        assert!(doc.undo().is_none());
+        assert_eq!(doc.redo().unwrap(), after);
+        assert_eq!(doc.buffer.contents(), b"one!\nx\ntwo\n");
     }
 }

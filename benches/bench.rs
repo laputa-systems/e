@@ -170,7 +170,9 @@ fn file_write_1000_lines(bencher: Bencher) {
     let path = dir.0.join("fixture.rs");
     let data = make_rust_source(1_000);
     bench_with_syscall_trace(bencher, || {
-        e::file_io::write_file(&path, &data).unwrap();
+        let cleaned = e::file_io::clean_for_write(&data);
+        e::file_io::write_file(&path, &cleaned, e::file_io::file_modification_time(&path))
+            .unwrap();
         black_box(())
     });
 }
@@ -179,7 +181,7 @@ fn file_write_1000_lines(bencher: Bencher) {
 fn document_insert_10_seal_undo_all(b: Bencher) {
     let data = make_rust_source(500);
     bench_with_syscall_trace(b, || {
-        let mut document = Document::new(data.clone(), None);
+        let mut document = Document::new(black_box(&data).clone(), None);
         for i in 0..10 {
             let line = i % document.buffer.line_count();
             document.insert(line, 0, b"// ");
@@ -194,7 +196,7 @@ fn document_insert_10_seal_undo_all(b: Bencher) {
 fn document_insert_delete_interleaved(b: Bencher) {
     let data = make_rust_source(500);
     bench_with_syscall_trace(b, || {
-        let mut document = Document::new(data.clone(), None);
+        let mut document = Document::new(black_box(&data).clone(), None);
         for _ in 0..5 {
             let line = document.buffer.line_count() / 2;
             let pos = document.insert(line, 0, b"new line\n");
@@ -282,7 +284,7 @@ fn find_update_python_10k(b: Bencher) {
     viewport.scroll_line = 5_000;
     let mut find = FindState::new();
     bench_with_syscall_trace(b, || {
-        find.update_highlights_lazy(r"benchmark_token_\d+", &buffer, &viewport);
+        find.update_highlights_lazy(r"benchmark_token_\d+", black_box(&buffer), black_box(&viewport));
         black_box((find.total_count, find.matches.len()));
     });
 }
@@ -294,7 +296,7 @@ fn find_refresh_viewport_cached_python_10k(b: Bencher) {
     let mut find = FindState::new();
     find.update_highlights_lazy(r"benchmark_token_\d+", &buffer, &viewport);
     bench_with_syscall_trace(b, || {
-        find.refresh_viewport_matches(&buffer, &viewport);
+        find.refresh_viewport_matches(black_box(&buffer), black_box(&viewport));
         black_box(find.matches.len());
     });
 }
@@ -306,8 +308,8 @@ fn find_refresh_viewport_invalidated_python_10k(b: Bencher) {
     let mut find = FindState::new();
     find.update_highlights_lazy(r"benchmark_token_\d+", &buffer, &viewport);
     bench_with_syscall_trace(b, || {
-        viewport.scroll_line = if viewport.scroll_line == 0 { 1 } else { 0 };
-        find.refresh_viewport_matches(&buffer, &viewport);
+        viewport.scroll_line = black_box(if viewport.scroll_line == 0 { 1 } else { 0 });
+        find.refresh_viewport_matches(black_box(&buffer), black_box(&viewport));
         black_box(find.matches.len());
     });
 }
@@ -318,7 +320,7 @@ fn paste_multiline_python_100k_into_10k(b: Bencher) {
     let paste = make_python_source_bytes(100 * 1024);
     let cursor = TextPosition::new(5_000, 12);
     bench_with_syscall_trace(b, || {
-        let after = document.insert(cursor.line, cursor.column, &paste);
+        let after = document.insert(cursor.line, cursor.column, black_box(&paste));
         document.undo();
         black_box(after);
     });
@@ -329,7 +331,7 @@ fn replace_all_python_10k(b: Bencher) {
     let data = make_python_source(10_000);
     let pattern = regex_lite::Regex::new(r"benchmark_token_\d+").unwrap();
     bench_with_syscall_trace(b, || {
-        let mut document = Document::new(data.clone(), Some("fixture.py".to_string()));
+        let mut document = Document::new(black_box(&data).clone(), Some("fixture.py".to_string()));
         let last_line = document.buffer.line_count().saturating_sub(1);
         let end = TextPosition::new(last_line, document.buffer.line_character_count(last_line));
         let text_bytes = document.text_in_range(TextPosition::zero(), end);
@@ -357,7 +359,7 @@ macro_rules! search_benchmarks {
             let re = regex_lite::Regex::new("ZZNOTFOUND").unwrap();
             bench_with_syscall_trace(b, || {
                 black_box(FindState::search_forward(
-                    &buffer,
+                    black_box(&buffer),
                     &re,
                     TextPosition::zero(),
                 ))
@@ -371,7 +373,7 @@ macro_rules! search_benchmarks {
             let re = regex_lite::Regex::new("ZZNOTFOUND").unwrap();
             let last = TextPosition::new(buffer.line_count().saturating_sub(1), 0);
             bench_with_syscall_trace(b, || {
-                black_box(FindState::search_backward(&buffer, &re, last))
+                black_box(FindState::search_backward(black_box(&buffer), &re, last))
             });
         }
     };
@@ -383,6 +385,7 @@ search_benchmarks!(search_forward_miss_1000, search_backward_miss_1000, 1000);
 fn viewport_ensure_cursor_visible_jump(b: Bencher) {
     let buffer = GapBuffer::from_bytes(make_rust_source(1_000));
     bench_with_syscall_trace(b, || {
+        let buffer = black_box(&buffer);
         let mut viewport = Viewport::new(120, 40);
         let mut widths = |line: usize| buffer.display_column_at(line, usize::MAX);
         for line in (0..buffer.line_count()).step_by(10) {
@@ -394,11 +397,15 @@ fn viewport_ensure_cursor_visible_jump(b: Bencher) {
 
 #[rustybench::bench]
 fn viewport_resize_unanchored_100k(b: Bencher) {
+    // Resizing without an anchor only changes dimensions; the work worth
+    // measuring is re-establishing the cursor's visibility afterwards.
     let mut viewport = Viewport::new(120, 40);
     viewport.scroll_line = 50_000;
+    let mut widths = |_line: usize| 240;
     bench_with_syscall_trace(b, || {
-        viewport.width = if viewport.width == 120 { 80 } else { 120 };
-        viewport.height = if viewport.height == 40 { 30 } else { 40 };
+        viewport.width = black_box(if viewport.width == 120 { 80 } else { 120 });
+        viewport.height = black_box(if viewport.height == 40 { 30 } else { 40 });
+        viewport.ensure_cursor_visible(black_box(50_010), 0, 6, &mut widths);
         black_box((viewport.scroll_line, viewport.scroll_wrap));
     });
 }
@@ -411,9 +418,9 @@ fn viewport_resize_anchored_100k(b: Bencher) {
     let gutter = 6;
     let mut widths = |_line: usize| 240;
     bench_with_syscall_trace(b, || {
-        let anchor = viewport.center_anchor(line_count, gutter, &mut widths);
-        viewport.width = if viewport.width == 120 { 80 } else { 120 };
-        viewport.height = if viewport.height == 40 { 30 } else { 40 };
+        let anchor = viewport.center_anchor(black_box(line_count), gutter, &mut widths);
+        viewport.width = black_box(if viewport.width == 120 { 80 } else { 120 });
+        viewport.height = black_box(if viewport.height == 40 { 30 } else { 40 });
         if let Some(anchor) = anchor {
             viewport.center_on_anchor(anchor, line_count, gutter, &mut widths);
         }

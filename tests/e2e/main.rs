@@ -2,12 +2,18 @@ mod clipboard;
 mod commands;
 mod display;
 mod editing;
+mod external_changes;
+mod file_fidelity;
+mod file_locks;
 mod find_replace;
 #[allow(dead_code)]
 mod harness;
 mod mouse;
 mod movement;
+mod persistent_undo;
 mod save_quit;
 mod selection;
 mod startup;
+mod startup_inputs;
+mod terminal_lifecycle;
 mod undo;

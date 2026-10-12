@@ -1,9 +1,11 @@
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+pub use ptytest::ExitStatus;
 use ptytest::{
-    Color, CommandSpec, Deadline, ExitStatus, ProtocolProfile, PtyTest, Scenario, Size,
+    Color, CommandSpec, Deadline, ProtocolProfile, PtyTest, Scenario, Size,
     TerminalBaseline, TestEnv,
 };
 
@@ -190,11 +192,17 @@ fn recording_path() -> Option<PathBuf> {
 // TestEditor — thin e-specific adapter over ptytest
 // ---------------------------------------------------------------------------
 
+/// Upper bound for one editor reaction. Output normally arrives within
+/// milliseconds; the bound only matters on a loaded host, where a short one
+/// made `wait` give up before the editor had drawn.
+const OUTPUT_WAIT: Duration = Duration::from_secs(2);
+
 pub struct TestEditor {
     terminal: PtyTest,
     terminal_baseline: TerminalBaseline,
     restoration_checked: bool,
-    pub home: TempDir,
+    /// Shared so a later session can reuse the same isolated HOME.
+    pub home: Arc<TempDir>,
     pub rows: u16,
     pub cols: u16,
     recording: Option<Recording>,
@@ -207,14 +215,76 @@ impl TestEditor {
     }
 
     pub fn with_size(args: &[&str], rows: u16, cols: u16) -> Self {
-        Self::spawn(args, rows, cols)
+        let home = Arc::new(TempDir::new());
+        let command = CommandSpec::new(selected_binary()).args(args.iter().copied());
+        Self::spawn(home, command, rows, cols)
     }
 
-    fn spawn(args: &[&str], rows: u16, cols: u16) -> Self {
-        let home = TempDir::new();
-        let binary = selected_binary();
-        let command = CommandSpec::new(binary)
-            .args(args.iter().copied())
+    /// Start another session that sees the state files an earlier one left
+    /// in the same isolated HOME. The earlier session must already be done.
+    pub fn next_session(&self, args: &[&str]) -> Self {
+        let command = CommandSpec::new(selected_binary()).args(args.iter().copied());
+        Self::spawn(Arc::clone(&self.home), command, self.rows, self.cols)
+    }
+
+    /// Start a session that may stop before the editor screen appears (a
+    /// startup prompt, or an error exit), so no editor UI is awaited.
+    pub fn next_session_before_ui(&self, args: &[&str]) -> Self {
+        let command = CommandSpec::new(selected_binary()).args(args.iter().copied());
+        Self::spawn_inner(Arc::clone(&self.home), command, self.rows, self.cols, false)
+    }
+
+    /// Like `next_session_before_ui`, in a fresh HOME.
+    pub fn before_ui(args: &[&str]) -> Self {
+        let command = CommandSpec::new(selected_binary()).args(args.iter().copied());
+        Self::spawn_inner(Arc::new(TempDir::new()), command, 24, 80, false)
+    }
+
+    /// Start the editor with `input` piped to its stdin, as in
+    /// `printf ... | e`. The terminal stays on the PTY, so keys still arrive.
+    pub fn piped(input: &[u8], args: &[&str]) -> Self {
+        let home = Arc::new(TempDir::new());
+        let input_path = home.path().join("stdin.bin");
+        std::fs::write(&input_path, input).unwrap();
+        let command = CommandSpec::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"input=$1; editor=$2; shift 2; /bin/cat "$input" | "$editor" "$@""#)
+            .arg("sh")
+            .arg(&input_path)
+            .arg(selected_binary())
+            .args(args.iter().copied());
+        Self::spawn(home, command, 24, 80)
+    }
+
+    /// Start the editor from a shell that ignores SIGTERM and SIGHUP, so the
+    /// editor can be signalled without taking the shell down. After the
+    /// editor ends the shell prints its exit status and the terminal's line
+    /// discipline flags (`stty -a`), which `shell_epilogue` reads back.
+    pub fn in_shell(args: &[&str]) -> Self {
+        let home = Arc::new(TempDir::new());
+        let command = CommandSpec::new("/bin/sh")
+            .arg("-c")
+            .arg(
+                r#"trap "" TERM HUP; editor=$1; shift; "$editor" "$@"; echo "editor-exit=$?"; /bin/stty -a; echo shell-done"#,
+            )
+            .arg("sh")
+            .arg(selected_binary())
+            .args(args.iter().copied());
+        Self::spawn(home, command, 24, 80)
+    }
+
+    fn spawn(home: Arc<TempDir>, command: CommandSpec, rows: u16, cols: u16) -> Self {
+        Self::spawn_inner(home, command, rows, cols, true)
+    }
+
+    fn spawn_inner(
+        home: Arc<TempDir>,
+        command: CommandSpec,
+        rows: u16,
+        cols: u16,
+        wait_for_editor_ui: bool,
+    ) -> Self {
+        let command = command
             .current_dir(home.path())
             // A HOME-only PATH forces the editor's internal clipboard, so
             // parallel E2E tests never race through the system clipboard.
@@ -247,7 +317,9 @@ impl TestEditor {
             recording: recording_path().map(|_| Recording::new(rows, cols)),
             recorded_output: 0,
         };
-        editor.wait_for_startup();
+        if wait_for_editor_ui {
+            editor.wait_for_startup();
+        }
         editor
     }
 
@@ -287,10 +359,11 @@ impl TestEditor {
     /// semantic row/cell state; a legitimate no-op input is allowed to remain
     /// silent instead of being turned into a timing failure.
     pub fn wait(&mut self) {
-        let deadline = self.terminal.deadline(Duration::from_millis(100));
-        self.terminal
-            .wait_for_output(deadline)
-            .expect("wait for editor output");
+        let deadline = self.terminal.deadline(OUTPUT_WAIT);
+        // A timeout only means the input was a no-op: the output arrives
+        // within milliseconds when there is any, so a generous deadline costs
+        // time only for inputs that legitimately stay silent.
+        let _ = self.terminal.wait_for_output(deadline);
         self.capture_output();
     }
 
@@ -398,6 +471,37 @@ impl TestEditor {
         self.send_raw(b"\x1b[<65;1;1M");
         self.wait();
     }
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        self.terminal
+            .resize(Size::new(cols, rows).expect("non-zero editor size"))
+            .expect("resize PTY");
+        self.rows = rows;
+        self.cols = cols;
+        self.wait();
+    }
+
+    /// Signal the editor's whole process group.
+    pub fn signal(&mut self, signal: i32) {
+        self.terminal.signal(signal).expect("signal editor");
+    }
+
+    /// Fail unless the terminal modes (alternate screen, mouse, paste, cursor)
+    /// are back to what they were before the editor started.
+    pub fn assert_terminal_restored(&mut self) {
+        self.terminal
+            .assert_terminal_restored(&self.terminal_baseline)
+            .expect("editor restored the terminal modes");
+    }
+
+    /// Wait for the shell started by `in_shell` to finish and return what it
+    /// printed after the editor ended.
+    pub fn shell_epilogue(&mut self) -> String {
+        self.wait_until(Duration::from_secs(5), |e| {
+            e.screen_text().contains("shell-done")
+        });
+        self.screen_text()
+    }
+
     pub fn focus_in(&mut self) {
         self.send_raw(b"\x1b[I");
         self.wait();
@@ -542,6 +646,19 @@ fn selected_binary() -> PathBuf {
         return path;
     }
     PathBuf::from(env!("CARGO_BIN_EXE_e"))
+}
+
+/// Replace a file's content behind the editor's back and give it a fixed,
+/// distinct modification time, so the change is detectable whatever the
+/// filesystem's timestamp granularity.
+pub fn modify_externally(path: &Path, content: &[u8]) {
+    std::fs::write(path, content).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000))
+        .unwrap();
 }
 
 /// Create a file in an application fixture directory.

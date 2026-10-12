@@ -211,6 +211,7 @@ impl Renderer {
             self.hl_cache.clear();
             self.hl_cache_version = u64::MAX;
             self.hl_dirty_from = 0;
+            self.user_types.clear();
         }
     }
 
@@ -351,12 +352,17 @@ impl Renderer {
                     self.hl_dirty_from = 0;
                 }
                 self.hl_cache_version = buf_version;
-                let may_define_type = dirty < line_count && {
-                    buffer.line_text_into(dirty, &mut self.line_buf);
-                    self.line_buf.windows(4).any(|word| word == b"type")
-                };
-                if self.hl_cache.is_empty() || !self.user_types.is_empty() || may_define_type {
-                    self.update_user_types(buffer, line_count);
+                // Only XSH has user-declared types; other languages skip the
+                // whole-buffer scan.
+                if self.language == Some(Language::Xsh) {
+                    let may_define_type = dirty < line_count && {
+                        buffer.line_text_into(dirty, &mut self.line_buf);
+                        self.line_buf.windows(4).any(|word| word == b"type")
+                    };
+                    if self.hl_cache.is_empty() || !self.user_types.is_empty() || may_define_type
+                    {
+                        self.update_user_types(buffer, line_count);
+                    }
                 }
             }
             if let Some(highlighter) = self.highlighter.as_mut() {

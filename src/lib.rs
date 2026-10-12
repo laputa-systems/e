@@ -14,4 +14,5 @@ pub mod render;
 pub mod selection;
 #[allow(unused)]
 pub mod signal;
+pub mod terminal;
 pub mod viewport;

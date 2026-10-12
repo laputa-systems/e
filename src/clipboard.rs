@@ -63,34 +63,34 @@ impl Clipboard {
         }
     }
 
-    pub fn copy(&mut self, text: &str) {
+    /// Copy to the system clipboard. The internal copy is updated first, so
+    /// an `Err` means only that other applications will not see the text.
+    pub fn copy(&mut self, text: &str) -> Result<(), String> {
         self.internal = text.to_string();
         self.internal_fragments = None;
-        let _ = match &self.backend {
+        self.send_to_backend(text)
+    }
+
+    pub fn copy_multi(&mut self, fragments: &[String]) -> Result<(), String> {
+        let text = fragments.join("\n");
+        self.internal = text.clone();
+        self.internal_fragments = Some(fragments.to_vec());
+        self.send_to_backend(&text)
+    }
+
+    fn send_to_backend(&self, text: &str) -> Result<(), String> {
+        match &self.backend {
             ClipboardBackend::Pbcopy => pipe_to_command("pbcopy", &[], text),
             ClipboardBackend::WlCopy => pipe_to_command("wl-copy", &[], text),
             ClipboardBackend::Xclip => pipe_to_command("xclip", &["-selection", "clipboard"], text),
             ClipboardBackend::Xsel => pipe_to_command("xsel", &["--clipboard", "--input"], text),
             ClipboardBackend::Internal => Ok(()),
-        };
+        }
     }
 
-    pub fn copy_multi(&mut self, fragments: &[String]) {
-        let text = fragments.join("\n");
-        self.internal = text.clone();
-        self.internal_fragments = Some(fragments.to_vec());
-        let _ = match &self.backend {
-            ClipboardBackend::Pbcopy => pipe_to_command("pbcopy", &[], &text),
-            ClipboardBackend::WlCopy => pipe_to_command("wl-copy", &[], &text),
-            ClipboardBackend::Xclip => {
-                pipe_to_command("xclip", &["-selection", "clipboard"], &text)
-            }
-            ClipboardBackend::Xsel => pipe_to_command("xsel", &["--clipboard", "--input"], &text),
-            ClipboardBackend::Internal => Ok(()),
-        };
-    }
-
-    pub fn paste(&self) -> String {
+    /// Read the system clipboard. `Err` means the clipboard program could not
+    /// be run, which is different from an empty clipboard (`Ok("")`).
+    pub fn paste(&self) -> Result<String, String> {
         match &self.backend {
             ClipboardBackend::Pbcopy => read_from_command("pbpaste", &[]),
             ClipboardBackend::WlCopy => read_from_command("wl-paste", &["-n"]),
@@ -98,17 +98,17 @@ impl Clipboard {
                 read_from_command("xclip", &["-selection", "clipboard", "-o"])
             }
             ClipboardBackend::Xsel => read_from_command("xsel", &["--clipboard", "--output"]),
-            ClipboardBackend::Internal => self.internal.clone(),
+            ClipboardBackend::Internal => Ok(self.internal.clone()),
         }
     }
 
-    pub fn paste_contents(&self) -> ClipboardPaste {
+    pub fn paste_contents(&self) -> Result<ClipboardPaste, String> {
         match &self.backend {
-            ClipboardBackend::Internal => ClipboardPaste {
+            ClipboardBackend::Internal => Ok(ClipboardPaste {
                 text: self.internal.clone(),
                 fragments: self.internal_fragments.clone(),
-            },
-            _ => self.paste_contents_for_text(self.paste()),
+            }),
+            _ => Ok(self.paste_contents_for_text(self.paste()?)),
         }
     }
 }
@@ -122,33 +122,37 @@ fn command_exists(name: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-fn pipe_to_command(cmd: &str, args: &[&str], input: &str) -> Result<(), ()> {
+fn pipe_to_command(cmd: &str, args: &[&str], input: &str) -> Result<(), String> {
     let mut child = Command::new(cmd)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| ())?;
+        .map_err(|e| format!("{cmd}: {e}"))?;
 
-    if let Some(ref mut stdin) = child.stdin {
-        stdin.write_all(input.as_bytes()).map_err(|_| ())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input.as_bytes())
+            .map_err(|e| format!("{cmd}: {e}"))?;
     }
-    child.wait().map_err(|_| ())?;
+    let status = child.wait().map_err(|e| format!("{cmd}: {e}"))?;
+    if !status.success() {
+        return Err(format!("{cmd} exited with {status}"));
+    }
     Ok(())
 }
 
-fn read_from_command(cmd: &str, args: &[&str]) -> String {
+/// A non-zero exit with no output is how several clipboard tools report an
+/// empty clipboard, so only a failure to run the command is an error.
+fn read_from_command(cmd: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(cmd)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output();
-
-    match output {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
-        Err(_) => String::new(),
-    }
+        .output()
+        .map_err(|e| format!("{cmd}: {e}"))?;
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 #[cfg(test)]
@@ -188,22 +192,22 @@ mod tests {
     #[test]
     fn test_internal_copy_paste() {
         let mut clip = Clipboard::internal_only();
-        clip.copy("hello world");
-        assert_eq!(clip.paste(), "hello world");
+        clip.copy("hello world").unwrap();
+        assert_eq!(clip.paste().unwrap(), "hello world");
     }
 
     #[test]
     fn test_internal_overwrite() {
         let mut clip = Clipboard::internal_only();
-        clip.copy("first");
-        clip.copy("second");
-        assert_eq!(clip.paste(), "second");
+        clip.copy("first").unwrap();
+        clip.copy("second").unwrap();
+        assert_eq!(clip.paste().unwrap(), "second");
     }
 
     #[test]
     fn test_internal_empty() {
         let clip = Clipboard::internal_only();
-        assert_eq!(clip.paste(), "");
+        assert_eq!(clip.paste().unwrap(), "");
     }
 
     #[test]
@@ -214,14 +218,16 @@ mod tests {
     #[test]
     fn test_internal_multiline() {
         let mut clip = Clipboard::internal_only();
-        clip.copy("line1\nline2\nline3");
-        assert_eq!(clip.paste(), "line1\nline2\nline3");
+        clip.copy("line1\nline2\nline3").unwrap();
+        assert_eq!(clip.paste().unwrap(), "line1\nline2\nline3");
     }
 
     #[test]
     fn test_external_paste_contents_reuses_fragments_when_text_matches() {
         let mut clip = Clipboard::with_backend_for_test("pbcopy");
-        clip.copy_multi(&["hello".to_string(), "world".to_string()]);
+        // The backend program may be absent on the test host; only the
+        // internal fragments matter here.
+        let _ = clip.copy_multi(&["hello".to_string(), "world".to_string()]);
         let contents = clip.paste_contents_from_text_for_test("hello\nworld");
         assert_eq!(contents.text, "hello\nworld");
         assert_eq!(
@@ -233,7 +239,9 @@ mod tests {
     #[test]
     fn test_external_paste_contents_drops_fragments_when_text_differs() {
         let mut clip = Clipboard::with_backend_for_test("pbcopy");
-        clip.copy_multi(&["hello".to_string(), "world".to_string()]);
+        // The backend program may be absent on the test host; only the
+        // internal fragments matter here.
+        let _ = clip.copy_multi(&["hello".to_string(), "world".to_string()]);
         let contents = clip.paste_contents_from_text_for_test("other");
         assert_eq!(contents.text, "other");
         assert_eq!(contents.fragments, None);

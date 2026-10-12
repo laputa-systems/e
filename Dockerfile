@@ -1,4 +1,5 @@
-FROM alpine:3.24.1
+# Multi-arch index digest of alpine:3.24.1; the tag is kept for readability.
+FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 ARG TARGETARCH
 ARG LLVM_VERSION=23.1.0-rc2
@@ -22,7 +23,9 @@ RUN apk add --no-cache \
 RUN ar rcs /usr/lib/libutil.a
 
 # Use the same prebuilt LLVM family as the Linux CI image. The archive is
-# musl-linked so clang, lld, and the LLVM tools run inside Alpine.
+# musl-linked so clang, lld, and the LLVM tools run inside Alpine. It is built
+# by the laputa-systems/llvm-prebuilt-musl repository and verified here by
+# sha256, so that repository is in the trust path of every shipped Linux binary.
 ADD https://github.com/laputa-systems/llvm-prebuilt-musl/releases/download/llvm-musl-${LLVM_VERSION}-${LLVM_RELEASE_SHA}/clang+llvm-${LLVM_VERSION}-x86_64-linux-musl.tar.xz /tmp/llvm-x86_64.tar.xz
 ADD https://github.com/laputa-systems/llvm-prebuilt-musl/releases/download/llvm-musl-${LLVM_VERSION}-${LLVM_RELEASE_SHA}/clang+llvm-${LLVM_VERSION}-aarch64-linux-musl.tar.xz /tmp/llvm-aarch64.tar.xz
 RUN case "$TARGETARCH" in \
@@ -37,8 +40,9 @@ RUN case "$TARGETARCH" in \
     && test -f /opt/llvm-musl/lib/libclang.so \
     && rm /tmp/llvm-x86_64.tar.xz /tmp/llvm-aarch64.tar.xz
 
-# mold links the release binaries. It is a musl-linked prerelease build, so it runs
-# inside Alpine; clang selects it through --ld-path in musl-cargo.
+# mold links the release binaries. It is a musl-linked build made by the
+# joshuarli/mold fork (also in the shipped-binary trust path, verified by sha256),
+# so it runs inside Alpine; clang selects it through --ld-path in musl-cargo.
 ADD https://github.com/joshuarli/mold/releases/download/mold-musl-${MOLD_VERSION}-${MOLD_RELEASE_SHA}/mold-${MOLD_VERSION}-x86_64-linux-musl.tar.gz /tmp/mold-x86_64.tar.gz
 ADD https://github.com/joshuarli/mold/releases/download/mold-musl-${MOLD_VERSION}-${MOLD_RELEASE_SHA}/mold-${MOLD_VERSION}-aarch64-linux-musl.tar.gz /tmp/mold-aarch64.tar.gz
 RUN case "$TARGETARCH" in \
@@ -61,8 +65,10 @@ RUN for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do \
         done; \
     done
 
-ADD https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-musl/rustup-init /rustup-init-x86_64
-ADD https://static.rust-lang.org/rustup/dist/aarch64-unknown-linux-musl/rustup-init /rustup-init-aarch64
+# rustup-init is pinned to a versioned archive URL and verified by sha256; a
+# rustup release means bumping the version and both digests.
+ADD --checksum=sha256:331228566cc931f32cd684f9bebc5956a5e5d7394c8d5de595f196a658ab98e6 https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-musl/rustup-init /rustup-init-x86_64
+ADD --checksum=sha256:1ddf36182ac5d1782dbeefcb9bea7f5f9412d88f4a0d5047b1564a223624e8c6 https://static.rust-lang.org/rustup/archive/1.29.1/aarch64-unknown-linux-musl/rustup-init /rustup-init-aarch64
 RUN case "$TARGETARCH" in \
         amd64) init=/rustup-init-x86_64 ;; \
         arm64) init=/rustup-init-aarch64 ;; \

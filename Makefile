@@ -12,12 +12,11 @@ RELEASE_RUSTFLAGS := -Zlocation-detail=none -Zunstable-options -Cpanic=immediate
 # well as in the Linux release image.
 cargo = $(if $(findstring -linux-musl,$(TARGET)),,$(if $(filter release-static release-dynamic test,$(1)),CARGO_TARGET_$(TARGET_ENV)_LINKER=clang ,)$(if $(filter release-static release-dynamic,$(1)),RUSTFLAGS="$(RELEASE_RUSTFLAGS)")) MUSL_TARGET="$(TARGET)" MUSL_BUILD_MODE="$(1)" $(CARGO_CMD)
 
-RUSTYBENCH  ?= cargo run --quiet --manifest-path ../rustybench/Cargo.toml --
 TEST_BINARY_ENV := E_TEST_BINARY
 TEST_TARGETS := --tests
 
-.PHONY: build test test-ci lint release release-dynamic verify-release verify-release-dynamic install
-.PHONY: bench bench-hi-lite bench-syscalls gen-xsh record gifs
+.PHONY: build test test-ci lint bench release release-dynamic verify-release verify-release-dynamic install
+.PHONY: record gifs
 
 build:
 	$(call cargo,dev) build
@@ -31,7 +30,10 @@ test-ci:
 	$(call cargo,test) test --quiet --release $(TEST_TARGETS)
 
 lint:
-	cargo clippy --fix --allow-dirty --all-targets --all-features -- --deny warnings
+	cargo clippy --all-targets --all-features -- --deny warnings
+
+bench:
+	cargo bench --bench bench
 
 release:
 	$(call cargo,release-static) clean -p $(NAME) --release --target $(TARGET)
@@ -77,11 +79,6 @@ install: release
 		codesign -fs - ~/usr/bin/$(NAME); \
 	fi
 
-# Regenerate the XSH vocabulary region of ../hi-lite/src/languages/xsh.rs from the
-# registry (XSH_REPO overrides the path)
-gen-xsh:
-	cargo run --quiet --example gen_xsh
-
 # Record e2e tests as asciicast .cast files (single-threaded for clean capture)
 record:
 	rm -rf tests/e2e/recordings/*.cast tests/e2e/recordings/*.gif
@@ -92,4 +89,4 @@ gifs:
 	@for f in tests/e2e/recordings/*.cast; do \
 	  agg "$$f" "$${f%.cast}.gif" 2>/dev/null; \
 	done
-	@echo "$$(ls tests/e2e/recordings/*.gif | wc -l | tr -d ' ') GIFs ??? tests/e2e/recordings/"
+	@echo "$$(ls tests/e2e/recordings/*.gif | wc -l | tr -d ' ') GIFs written to tests/e2e/recordings/"

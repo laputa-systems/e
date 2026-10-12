@@ -148,22 +148,69 @@ impl GapBuffer {
 
     /// Insert `bytes` at logical byte offset `pos`.
     pub fn insert(&mut self, pos: usize, bytes: &[u8]) {
-        assert!(pos <= self.len_logical());
-        self.move_gap_to(pos);
-        self.ensure_gap(bytes.len());
-        self.storage[self.gap_start..self.gap_start + bytes.len()].copy_from_slice(bytes);
-        self.gap_start += bytes.len();
+        self.insert_storage(pos, bytes);
         self.update_line_index_insert(pos, bytes);
         self.version += 1;
     }
 
     /// Delete `count` bytes starting at logical byte offset `pos`.
     pub fn delete(&mut self, pos: usize, count: usize) {
+        self.delete_storage(pos, count);
+        self.update_line_index_delete(pos, count);
+        self.version += 1;
+    }
+
+    /// Replace many ranges at once. Each item is `(start, end, replacement)` in
+    /// pre-edit byte offsets; ranges are half-open, sorted, and non-overlapping.
+    /// The result is identical to deleting and then inserting each range from
+    /// last to first, but the line index is rebuilt in a single pass instead of
+    /// being shifted once per edit, so cost is linear in lines plus edits.
+    pub fn replace_sorted<'a, I>(&mut self, edits: I)
+    where
+        I: ExactSizeIterator<Item = (usize, usize, &'a [u8])> + DoubleEndedIterator + Clone,
+    {
+        if edits.len() == 1 {
+            // One edit shifts the index once either way; skip the rebuild.
+            let (start, end, replacement) = edits.clone().next().unwrap();
+            if end > start {
+                self.delete(start, end - start);
+            }
+            if !replacement.is_empty() {
+                self.insert(start, replacement);
+            }
+            return;
+        }
+        let mut previous_end = 0;
+        for (start, end, _) in edits.clone() {
+            assert!(
+                previous_end <= start && start <= end,
+                "edits must be sorted and non-overlapping"
+            );
+            previous_end = end;
+        }
+        for (start, end, replacement) in edits.clone().rev() {
+            if end > start {
+                self.delete_storage(start, end - start);
+            }
+            if !replacement.is_empty() {
+                self.insert_storage(start, replacement);
+            }
+        }
+        self.rebuild_line_index(edits);
+    }
+
+    fn insert_storage(&mut self, pos: usize, bytes: &[u8]) {
+        assert!(pos <= self.len_logical());
+        self.move_gap_to(pos);
+        self.ensure_gap(bytes.len());
+        self.storage[self.gap_start..self.gap_start + bytes.len()].copy_from_slice(bytes);
+        self.gap_start += bytes.len();
+    }
+
+    fn delete_storage(&mut self, pos: usize, count: usize) {
         assert!(pos + count <= self.len_logical());
         self.move_gap_to(pos);
         self.gap_end += count;
-        self.update_line_index_delete(pos, count);
-        self.version += 1;
     }
 
     // -- read access --------------------------------------------------------
@@ -263,6 +310,74 @@ impl GapBuffer {
         }
 
         self.min_dirty_line = self.min_dirty_line.min(insert_line);
+    }
+
+    /// Rebuild `line_starts` and `line_ascii` for sorted, non-overlapping
+    /// replacements in one pass over the old index. Mirrors what
+    /// `update_line_index_delete` followed by `update_line_index_insert` does for
+    /// each edit: a merged or split line is ASCII only if every old line it
+    /// touches was ASCII and the inserted segment is ASCII.
+    fn rebuild_line_index<'a>(&mut self, edits: impl Iterator<Item = (usize, usize, &'a [u8])>) {
+        let old_starts = std::mem::take(&mut self.line_starts);
+        let old_ascii = std::mem::take(&mut self.line_ascii);
+        let mut starts = Vec::with_capacity(old_starts.len());
+        let mut ascii = Vec::with_capacity(old_starts.len());
+        starts.push(0);
+        ascii.push(old_ascii[0]);
+        let mut next = 1;
+        let mut delta = 0isize;
+        let mut first_dirty = None;
+        let shifted = |start: usize, delta: isize| (start as isize + delta) as usize;
+
+        for (start, end, replacement) in edits {
+            if start == end && replacement.is_empty() {
+                continue;
+            }
+            // Lines that begin at or before the edit start keep their starts.
+            while next < old_starts.len() && old_starts[next] <= start {
+                starts.push(shifted(old_starts[next], delta));
+                ascii.push(old_ascii[next]);
+                next += 1;
+            }
+            first_dirty.get_or_insert(starts.len() - 1);
+            // Newlines inside the deleted range merge their lines into this one.
+            while next < old_starts.len() && old_starts[next] <= end {
+                *ascii.last_mut().unwrap() &= old_ascii[next];
+                next += 1;
+            }
+            let merged_ascii = *ascii.last().unwrap();
+            let mut closed_first = false;
+            let mut segment_ascii = true;
+            for (k, &byte) in replacement.iter().enumerate() {
+                if byte == b'\n' {
+                    *ascii.last_mut().unwrap() = if closed_first {
+                        segment_ascii
+                    } else {
+                        merged_ascii && segment_ascii
+                    };
+                    closed_first = true;
+                    segment_ascii = true;
+                    starts.push(shifted(start + k + 1, delta));
+                    ascii.push(true);
+                } else if byte >= 0x80 {
+                    segment_ascii = false;
+                }
+            }
+            *ascii.last_mut().unwrap() = merged_ascii && segment_ascii;
+            delta += replacement.len() as isize - (end - start) as isize;
+        }
+        while next < old_starts.len() {
+            starts.push(shifted(old_starts[next], delta));
+            ascii.push(old_ascii[next]);
+            next += 1;
+        }
+
+        self.line_starts = starts;
+        self.line_ascii = ascii;
+        if let Some(line) = first_dirty {
+            self.min_dirty_line = self.min_dirty_line.min(line);
+            self.version += 1;
+        }
     }
 
     /// Incrementally update the line index after deleting `count` bytes at logical offset `pos`.
@@ -1106,7 +1221,71 @@ mod proptests {
         }
     }
 
+    fn arb_text() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(
+            prop::sample::select(vec![b'a', b'b', b'\n', b'\n', 0xc3, 0xa9]),
+            0..64,
+        )
+    }
+
+    /// Sorted non-overlapping ranges over a buffer of `len` bytes, each with a replacement.
+    fn arb_replacements(len: usize) -> impl Strategy<Value = Vec<(usize, usize, Vec<u8>)>> {
+        (
+            prop::collection::vec(0..=len, 0..12),
+            prop::collection::vec(arb_text(), 6),
+        )
+            .prop_map(|(mut cuts, texts)| {
+                cuts.sort_unstable();
+                let starts = cuts.iter().step_by(2);
+                let ends = cuts.iter().skip(1).step_by(2);
+                starts
+                    .zip(ends)
+                    .zip(texts)
+                    .map(|((start, end), text)| (*start, *end, text))
+                    .collect()
+            })
+    }
+
     proptest! {
+        /// replace_sorted matches deleting then inserting each range from last to first,
+        /// including the line index, ASCII flag validity, dirty line, and version bump.
+        #[test]
+        fn replace_sorted_matches_sequential_edits(
+            (initial, edits) in arb_text().prop_flat_map(|text| {
+                let len = text.len();
+                (Just(text), arb_replacements(len))
+            }),
+        ) {
+            let mut batched = GapBuffer::from_bytes(initial.clone());
+            let mut sequential = GapBuffer::from_bytes(initial);
+            let version = batched.version();
+            for (start, end, text) in edits.iter().rev() {
+                if end > start {
+                    sequential.delete(*start, end - start);
+                }
+                if !text.is_empty() {
+                    sequential.insert(*start, text);
+                }
+            }
+            batched.replace_sorted(
+                edits.iter().map(|(start, end, text)| (*start, *end, text.as_slice())),
+            );
+            prop_assert_eq!(batched.contents(), sequential.contents());
+            prop_assert_eq!(&batched.line_starts, &sequential.line_starts);
+            // Flags may be more precise than the sequential ones, but a set flag
+            // must always mean the line really is ASCII.
+            prop_assert_eq!(batched.line_starts.len(), batched.line_ascii.len());
+            for line in 0..batched.line_count() {
+                if batched.line_is_ascii(line) {
+                    prop_assert!(batched.line_text(line).is_ascii());
+                }
+            }
+            prop_assert_eq!(batched.take_dirty_line(), sequential.take_dirty_line());
+            if edits.iter().any(|(start, end, text)| start != end || !text.is_empty()) {
+                prop_assert!(batched.version() > version);
+            }
+        }
+
         /// After any sequence of edits, contents() matches the reference.
         #[test]
         fn contents_match_reference(

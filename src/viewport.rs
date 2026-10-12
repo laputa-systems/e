@@ -148,13 +148,34 @@ impl Viewport {
             return;
         }
 
-        // Fast path: when the cursor is far off-screen (more than 2× viewport heights
-        // away), skip the O(distance) per-line wrap scan and jump directly.  The slow
-        // path is still used for small overscrolls so minimal-scroll semantics are exact.
+        // Fast path: when the cursor is far off-screen (more than 2x viewport heights
+        // away), skip the O(distance) forward scan and bottom-align the cursor row by
+        // walking back from the cursor line, which costs O(rows) even with soft wrap.
+        // The slow path is still used for small overscrolls so minimal-scroll
+        // semantics are exact.
         if cursor_line.saturating_sub(self.scroll_line) > rows * 2 {
-            // Place cursor at the bottom of the viewport (1 row per line assumption).
-            self.scroll_line = cursor_line + 1 - rows;
-            self.scroll_wrap = 0;
+            let cursor_rows = cursor_wrap + 1;
+            if cursor_rows >= rows {
+                self.scroll_line = cursor_line;
+                self.scroll_wrap = cursor_rows - rows;
+                return;
+            }
+            let mut remaining = rows - cursor_rows;
+            let mut start_line = cursor_line;
+            let mut start_wrap = 0;
+            while remaining > 0 && start_line > 0 {
+                start_line -= 1;
+                let wraps = wrapped_rows(line_display_width(start_line), text_cols);
+                if wraps <= remaining {
+                    remaining -= wraps;
+                    start_wrap = 0;
+                } else {
+                    start_wrap = wraps - remaining;
+                    remaining = 0;
+                }
+            }
+            self.scroll_line = start_line;
+            self.scroll_wrap = start_wrap;
             return;
         }
 
@@ -263,59 +284,6 @@ impl Viewport {
 
         self.scroll_line = start_line;
         self.scroll_wrap = start_wrap;
-    }
-
-    /// Convert a buffer (line, column) to screen (row, column). Returns None if off-screen.
-    #[allow(dead_code)]
-    pub fn buffer_to_screen(
-        &self,
-        line: usize,
-        column: usize,
-        gutter_width: usize,
-        line_display_width: &mut dyn FnMut(usize) -> usize,
-    ) -> Option<(u16, u16)> {
-        let text_cols = self.text_cols(gutter_width);
-        if text_cols == 0 {
-            return None;
-        }
-        let rows = self.text_rows();
-
-        // Compute screen row by counting wrapped rows from scroll position
-        let mut screen_row: usize = 0;
-
-        if line < self.scroll_line {
-            return None;
-        }
-
-        if line == self.scroll_line {
-            let wrap = column / text_cols;
-            if wrap < self.scroll_wrap {
-                return None;
-            }
-            screen_row = wrap - self.scroll_wrap;
-        } else {
-            // Remaining rows from scroll_line
-            let first_wraps = wrapped_rows(line_display_width(self.scroll_line), text_cols);
-            screen_row += first_wraps.saturating_sub(self.scroll_wrap);
-
-            for l in (self.scroll_line + 1)..line {
-                screen_row += wrapped_rows(line_display_width(l), text_cols);
-            }
-
-            let wrap = column / text_cols;
-            screen_row += wrap;
-        }
-
-        if screen_row >= rows {
-            return None;
-        }
-
-        let screen_col = (column % text_cols) + gutter_width;
-        if screen_col >= self.width as usize {
-            return None;
-        }
-
-        Some((screen_row as u16, screen_col as u16))
     }
 }
 
@@ -525,42 +493,31 @@ mod tests {
         assert_eq!(v.scroll_wrap, 1);
     }
 
-    // -- buffer_to_screen ----------------------------------------------------
-
     #[test]
-    fn test_buffer_to_screen_basic() {
-        let v = Viewport::new(80, 24);
-        let result = v.buffer_to_screen(0, 0, 4, &mut trivial_width);
-        assert_eq!(result, Some((0, 4))); // row 0, column 0 + gutter
-    }
-
-    #[test]
-    fn test_buffer_to_screen_line_above_viewport() {
+    fn far_jump_accounts_for_soft_wrap() {
+        // 200-column lines at 76 text columns wrap to 3 rows each.
         let mut v = Viewport::new(80, 24);
-        v.scroll_line = 10;
-        assert_eq!(v.buffer_to_screen(5, 0, 4, &mut trivial_width), None);
+        let mut widths = |_line: usize| -> usize { 200 };
+        v.ensure_cursor_visible(100, 0, 4, &mut widths);
+
+        let text_cols = v.text_cols(4);
+        let mut rows = wrapped_rows(200, text_cols) - v.scroll_wrap;
+        for _ in (v.scroll_line + 1)..100 {
+            rows += wrapped_rows(200, text_cols);
+        }
+        rows += 1; // cursor sits on the first wrapped row of line 100
+        assert!(v.scroll_line <= 100);
+        assert!(rows <= v.text_rows(), "cursor row {rows} is past the text area");
+        // Bottom-aligned: scrolling one row less would lose the cursor.
+        assert!(rows + 1 > v.text_rows() || v.scroll_line == 0 && v.scroll_wrap == 0);
     }
 
     #[test]
-    fn test_buffer_to_screen_line_below_viewport() {
-        let v = Viewport::new(80, 24);
-        // text_rows = 22, so lines 0..22 are visible
-        assert_eq!(v.buffer_to_screen(22, 0, 4, &mut trivial_width), None);
-    }
-
-    #[test]
-    fn test_buffer_to_screen_no_gutter() {
-        let v = Viewport::new(80, 24);
-        let result = v.buffer_to_screen(5, 10, 0, &mut trivial_width);
-        assert_eq!(result, Some((5, 10)));
-    }
-
-    #[test]
-    fn test_buffer_to_screen_last_visible_line() {
-        let v = Viewport::new(80, 24);
-        // text_rows = 22, last visible line is 21
-        let result = v.buffer_to_screen(21, 0, 4, &mut trivial_width);
-        assert_eq!(result, Some((21, 4)));
+    fn far_jump_cursor_line_taller_than_viewport() {
+        let mut v = Viewport::new(14, 6); // 4 text rows, 10 text columns
+        let mut widths = |_line: usize| -> usize { 100 };
+        v.ensure_cursor_visible(50, 95, 4, &mut widths);
+        assert_eq!((v.scroll_line, v.scroll_wrap), (50, 9 + 1 - 4));
     }
 
     // -- center_on_line -------------------------------------------------------
@@ -628,39 +585,6 @@ mod tests {
         assert_eq!(v.scroll_line, 0);
         assert_eq!(v.scroll_wrap, 2);
     }
-
-    // -- buffer_to_screen edge cases -----------------------------------------
-
-    #[test]
-    fn test_buffer_to_screen_zero_text_cols() {
-        let v = Viewport::new(4, 24); // text_cols = 0 with gutter 4
-        assert_eq!(v.buffer_to_screen(0, 0, 4, &mut trivial_width), None);
-    }
-
-    #[test]
-    fn test_buffer_to_screen_scroll_wrap_above() {
-        let mut v = Viewport::new(14, 24); // text_cols=10
-        v.scroll_line = 0;
-        v.scroll_wrap = 2; // scrolled past first 2 wrap rows
-        // Col 5 is on wrap 0, which is before scroll_wrap → should return None
-        assert_eq!(v.buffer_to_screen(0, 5, 4, &mut |_| 30), None);
-    }
-
-    #[test]
-    fn test_buffer_to_screen_col_beyond_width() {
-        let v = Viewport::new(10, 24); // width = 10, text_cols = 6 with gutter 4
-        // column 8 → wrap 1, screen_col = 8%6 + 4 = 6, within width 10
-        let result = v.buffer_to_screen(0, 8, 4, &mut trivial_width);
-        assert_eq!(result, Some((1, 6)));
-        // screen_col = column % text_cols + gutter_width. If that >= width, returns None
-        // With text_cols=6, the max screen_col is 4+5=9 < 10, so it never exceeds.
-        // Test a case where column would land out of viewport rows instead
-        let v_small = Viewport::new(10, 4); // text_rows = 2
-        let result = v_small.buffer_to_screen(0, 20, 4, &mut trivial_width);
-        // wrap 20/6 = 3, screen_row = 3 >= text_rows(2) → None
-        assert_eq!(result, None);
-    }
-
     #[test]
     fn test_center_on_line_partial_wrap() {
         // Triggers the partial wrap branch (lines 158-161) in center_on_line
@@ -673,17 +597,6 @@ mod tests {
         // start_line should be 0 with start_wrap = 10 - 1 = 9
         assert_eq!(v.scroll_line, 0);
         assert_eq!(v.scroll_wrap, 9);
-    }
-
-    #[test]
-    fn test_buffer_to_screen_wrapped() {
-        // Line 0 is 20 chars wide, text_cols=10 → 2 wrapped rows
-        let v = Viewport::new(14, 24); // text_cols=10 with gutter 4
-        let mut widths = |_line: usize| -> usize { 20 };
-        // column 5 → wrap 0, screen column = 5 + 4 = 9
-        assert_eq!(v.buffer_to_screen(0, 5, 4, &mut widths), Some((0, 9)));
-        // column 12 → wrap 1, screen row 1, screen column = 2 + 4 = 6
-        assert_eq!(v.buffer_to_screen(0, 12, 4, &mut widths), Some((1, 6)));
     }
 }
 
@@ -725,25 +638,6 @@ mod proptests {
             // After call, scroll state must be sane.
             // If text_rows > 0, the cursor should now be reachable.
             // At minimum, no panic occurred.
-        }
-
-        /// buffer_to_screen never panics on arbitrary inputs.
-        #[test]
-        fn buffer_to_screen_no_panic(
-            width in 1u16..500,
-            height in 1u16..200,
-            line in 0usize..5000,
-            column in 0usize..5000,
-            gutter in 0usize..20,
-            scroll_line in 0usize..5000,
-            scroll_wrap in 0usize..50,
-        ) {
-            let mut v = Viewport::new(width, height);
-            v.scroll_line = scroll_line;
-            v.scroll_wrap = scroll_wrap;
-
-            let mut widths = |_line: usize| -> usize { 40 };
-            let _ = v.buffer_to_screen(line, column, gutter, &mut widths);
         }
 
         /// center_on_line never panics on arbitrary inputs.

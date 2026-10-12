@@ -41,9 +41,31 @@ pub struct UndoGroup {
     pub carets_after: CaretSnapshot,
 }
 
+/// Most undo groups kept. Matches the persisted-history load limit, so a saved
+/// history is never rejected for having too many groups.
+pub const MAX_UNDO_GROUPS: usize = 100_000;
+
+/// Most operation bytes kept across the undo stack, so one huge paste history
+/// cannot grow without bound. The newest group is always kept.
+pub const MAX_UNDO_BYTES: usize = 64 * 1024 * 1024;
+
+fn group_bytes(group: &UndoGroup) -> usize {
+    group
+        .operations
+        .iter()
+        .map(|operation| match operation {
+            UndoOperation::Insert { bytes, .. } | UndoOperation::Delete { bytes, .. } => {
+                bytes.len()
+            }
+        })
+        .sum()
+}
+
 /// Undo/redo stack with grouping heuristics.
 pub struct UndoStack {
     undo: Vec<UndoGroup>,
+    /// Sum of `group_bytes` over `undo`, kept in step to enforce the byte cap.
+    undo_bytes: usize,
     redo: Vec<UndoGroup>,
     /// Current accumulating group.
     current: Option<UndoGroup>,
@@ -64,6 +86,7 @@ impl UndoStack {
     pub fn new() -> Self {
         Self {
             undo: Vec::new(),
+            undo_bytes: 0,
             redo: Vec::new(),
             current: None,
             last_operation_kind: None,
@@ -71,6 +94,32 @@ impl UndoStack {
             last_cursor_position: TextPosition::zero(),
             force_group: false,
         }
+    }
+
+    /// Push a sealed group, then drop the oldest groups if a cap is exceeded.
+    /// Trimming goes 10% below the cap so the front drain is amortized.
+    fn push_undo(&mut self, group: UndoGroup) {
+        self.undo_bytes += group_bytes(&group);
+        self.undo.push(group);
+        self.trim_undo();
+    }
+
+    fn trim_undo(&mut self) {
+        if self.undo.len() <= MAX_UNDO_GROUPS && self.undo_bytes <= MAX_UNDO_BYTES {
+            return;
+        }
+        let group_target = MAX_UNDO_GROUPS - MAX_UNDO_GROUPS / 10;
+        let byte_target = MAX_UNDO_BYTES - MAX_UNDO_BYTES / 10;
+        let mut dropped = 0;
+        let mut kept_bytes = self.undo_bytes;
+        while dropped + 1 < self.undo.len()
+            && (self.undo.len() - dropped > group_target || kept_bytes > byte_target)
+        {
+            kept_bytes -= group_bytes(&self.undo[dropped]);
+            dropped += 1;
+        }
+        self.undo.drain(..dropped);
+        self.undo_bytes = kept_bytes;
     }
 
     /// Immediately flush the current group, sealing it as a completed undo step.
@@ -97,13 +146,37 @@ impl UndoStack {
 
     /// Replace both stacks with restored bytes, resetting all transient state.
     pub fn restore(&mut self, undo: Vec<UndoGroup>, redo: Vec<UndoGroup>) {
+        self.undo_bytes = undo.iter().map(group_bytes).sum();
         self.undo = undo;
+        self.trim_undo();
         self.redo = redo;
         self.current = None;
         self.last_operation_kind = None;
         self.last_operation_time = None;
         self.last_cursor_position = TextPosition::zero();
         self.force_group = false;
+    }
+
+    /// Record `operations` as one sealed group with a single pair of caret
+    /// snapshots. Equivalent to `begin_group`, recording each operation, then
+    /// `end_group`, without cloning the snapshots per operation.
+    pub fn record_group(
+        &mut self,
+        operations: Vec<UndoOperation>,
+        carets_before: CaretSnapshot,
+        carets_after: CaretSnapshot,
+    ) {
+        self.flush_current();
+        self.force_group = false;
+        if operations.is_empty() {
+            return;
+        }
+        self.redo.clear();
+        self.push_undo(UndoGroup {
+            operations,
+            carets_before,
+            carets_after,
+        });
     }
 
     /// Record an operation. Determines whether to extend current group or start new.
@@ -174,7 +247,7 @@ impl UndoStack {
 
     fn flush_current(&mut self) {
         if let Some(group) = self.current.take() {
-            self.undo.push(group);
+            self.push_undo(group);
         }
     }
 
@@ -183,6 +256,7 @@ impl UndoStack {
     pub fn undo(&mut self, mut apply: impl FnMut(&UndoOperation)) -> Option<CaretSnapshot> {
         self.flush_current();
         let group = self.undo.pop()?;
+        self.undo_bytes -= group_bytes(&group);
         let carets = group.carets_before.clone();
         for op in group.operations.iter().rev() {
             apply(op);
@@ -199,7 +273,7 @@ impl UndoStack {
         for op in &group.operations {
             apply(op);
         }
-        self.undo.push(group);
+        self.push_undo(group);
         Some(carets)
     }
 }
@@ -228,6 +302,87 @@ mod tests {
             byte_offset,
             bytes: Arc::from(bytes),
         }
+    }
+
+    fn origin() -> CaretSnapshot {
+        snap(TextPosition::zero())
+    }
+
+    fn group_offsets(stack: &UndoStack) -> Vec<usize> {
+        stack
+            .stacks()
+            .0
+            .iter()
+            .map(|group| match &group.operations[0] {
+                UndoOperation::Insert { byte_offset, .. }
+                | UndoOperation::Delete { byte_offset, .. } => *byte_offset,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_record_group_is_one_undo_step() {
+        let mut stack = UndoStack::new();
+        stack.record_group(
+            vec![del(4, b"x"), ins(4, b"y"), ins(0, b"z")],
+            snap(TextPosition::new(0, 1)),
+            snap(TextPosition::new(0, 2)),
+        );
+        let mut applied = 0;
+        let carets = stack.undo(|_| applied += 1).unwrap();
+        assert_eq!(applied, 3);
+        assert_eq!(carets, snap(TextPosition::new(0, 1)));
+        assert!(stack.undo(|_| {}).is_none());
+        assert_eq!(
+            stack.redo(|_| {}).unwrap(),
+            snap(TextPosition::new(0, 2))
+        );
+    }
+
+    #[test]
+    fn test_record_group_seals_pending_group_and_clears_redo() {
+        let mut stack = UndoStack::new();
+        stack.record(ins(0, b"a"), origin(), origin());
+        stack.undo(|_| {});
+        stack.record(ins(0, b"b"), origin(), origin());
+        stack.record_group(vec![ins(1, b"c")], origin(), origin());
+        assert!(stack.redo(|_| {}).is_none());
+        assert_eq!(group_offsets(&stack), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_undo_group_count_is_capped_keeping_newest() {
+        let mut stack = UndoStack::new();
+        for offset in 0..=MAX_UNDO_GROUPS {
+            stack.record_group(vec![ins(offset, b"a")], origin(), origin());
+        }
+        let offsets = group_offsets(&stack);
+        assert!(offsets.len() <= MAX_UNDO_GROUPS);
+        assert_eq!(*offsets.last().unwrap(), MAX_UNDO_GROUPS);
+        assert!(offsets.windows(2).all(|pair| pair[0] + 1 == pair[1]));
+        assert!(offsets[0] > 0, "oldest group should have been dropped");
+    }
+
+    #[test]
+    fn test_undo_bytes_are_capped_keeping_newest() {
+        let big = vec![0u8; MAX_UNDO_BYTES / 4 + 1];
+        let mut stack = UndoStack::new();
+        for offset in 0..6 {
+            stack.record_group(vec![ins(offset, &big)], origin(), origin());
+        }
+        let offsets = group_offsets(&stack);
+        assert!(offsets.len() < 6);
+        assert_eq!(*offsets.last().unwrap(), 5);
+
+        // Undo and redo keep the byte count consistent with the stack contents.
+        let kept = offsets.len();
+        for _ in 0..kept {
+            stack.undo(|_| {}).unwrap();
+        }
+        for _ in 0..kept {
+            stack.redo(|_| {}).unwrap();
+        }
+        assert_eq!(group_offsets(&stack), offsets);
     }
 
     #[test]

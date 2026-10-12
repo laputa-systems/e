@@ -103,13 +103,33 @@ impl CaretSnapshot {
 }
 
 /// Ordered set of carets with one primary caret that drives viewport focus.
+///
+/// Never empty, and `primary` always indexes a caret: every constructor and
+/// mutator preserves both, so `primary()` cannot panic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaretSet {
-    pub carets: Vec<Caret>,
-    pub primary: usize,
+    carets: Vec<Caret>,
+    primary: usize,
 }
 
 impl CaretSet {
+    /// `None` when `carets` is empty or `primary` is out of range.
+    pub fn from_carets(carets: Vec<Caret>, primary: usize) -> Option<Self> {
+        (primary < carets.len()).then_some(Self { carets, primary })
+    }
+
+    pub fn primary_index(&self) -> usize {
+        self.primary
+    }
+
+    pub fn as_slice(&self) -> &[Caret] {
+        &self.carets
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Caret> {
+        self.carets.iter_mut()
+    }
+
     pub fn new(pos: TextPosition) -> Self {
         Self {
             carets: vec![Caret::new(pos)],
@@ -143,12 +163,10 @@ impl CaretSet {
         self.primary().selection
     }
 
+    // Never empty, so an `is_empty` would only invite dead branches.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.carets.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.carets.is_empty()
     }
 
     pub fn is_multicursor(&self) -> bool {

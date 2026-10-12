@@ -11,6 +11,26 @@ struct ViewportMatchCache {
     height: u16,
 }
 
+/// Converts increasing byte offsets within one line to character columns,
+/// counting each stretch of text once instead of from the line start.
+struct ColumnCursor {
+    byte: usize,
+    column: usize,
+}
+
+impl ColumnCursor {
+    fn new() -> Self {
+        Self { byte: 0, column: 0 }
+    }
+
+    /// `byte_offset` must not be smaller than any offset passed before.
+    fn column_at(&mut self, line: &[u8], byte_offset: usize) -> usize {
+        self.column += buffer::character_count(&line[self.byte..byte_offset]);
+        self.byte = byte_offset;
+        self.column
+    }
+}
+
 pub struct FindState {
     pub pattern: String,
     /// Viewport-only matches, reused until the buffer or viewport changes.
@@ -26,6 +46,9 @@ pub struct FindState {
     /// Total match count across the entire file.
     pub total_count: usize,
     total_count_known: bool,
+    /// Lines that are not valid UTF-8 and so cannot match. Counted over the
+    /// whole file when the total match count is computed; zero until then.
+    skipped_invalid_lines: usize,
     /// Cursor position captured when find mode is opened; search anchors here.
     pub search_start: TextPosition,
     viewport_cache: Option<ViewportMatchCache>,
@@ -48,9 +71,16 @@ impl FindState {
             active: false,
             total_count: 0,
             total_count_known: false,
+            skipped_invalid_lines: 0,
             search_start: TextPosition::zero(),
             viewport_cache: None,
         }
+    }
+
+    /// Number of lines skipped because they are not valid UTF-8, as of the
+    /// last whole-file count (`update_highlights`). Reset on every new search.
+    pub fn skipped_invalid_lines(&self) -> usize {
+        self.skipped_invalid_lines
     }
 
     /// Clear all find state (matches, regex, current match).
@@ -61,6 +91,7 @@ impl FindState {
         self.current_index = 0;
         self.total_count = 0;
         self.total_count_known = false;
+        self.skipped_invalid_lines = 0;
         self.viewport_cache = None;
     }
 
@@ -93,6 +124,7 @@ impl FindState {
         self.current = None;
         self.total_count = 0;
         self.total_count_known = false;
+        self.skipped_invalid_lines = 0;
         self.viewport_cache = None;
         self.pattern = pattern.to_string();
         if pattern.is_empty() {
@@ -110,7 +142,9 @@ impl FindState {
         self.re = Some(re);
 
         if count_total {
-            self.total_count = Self::count_all_matches(self.re.as_ref().unwrap(), buffer);
+            let (total, skipped) = Self::count_all_matches(self.re.as_ref().unwrap(), buffer);
+            self.total_count = total;
+            self.skipped_invalid_lines = skipped;
             self.total_count_known = true;
         }
         self.refresh_viewport_matches(buffer, viewport);
@@ -153,9 +187,10 @@ impl FindState {
             let Ok(text) = std::str::from_utf8(&line_buf) else {
                 continue;
             };
+            let mut columns = ColumnCursor::new();
             for m in re.find_iter(text) {
-                let start_col = buffer::character_count(&line_buf[..m.start()]);
-                let end_col = buffer::character_count(&line_buf[..m.end()]);
+                let start_col = columns.column_at(&line_buf, m.start());
+                let end_col = columns.column_at(&line_buf, m.end());
                 self.matches.push((
                     TextPosition::new(line_idx, start_col),
                     TextPosition::new(line_idx, end_col),
@@ -174,9 +209,13 @@ impl FindState {
             let Ok(text) = std::str::from_utf8(&line_buf) else {
                 continue;
             };
+            if line_idx != pos.line {
+                index += re.find_iter(text).count();
+                continue;
+            }
+            let mut columns = ColumnCursor::new();
             for m in re.find_iter(text) {
-                let column = buffer::character_count(&line_buf[..m.start()]);
-                if line_idx == pos.line && column >= pos.column {
+                if columns.column_at(&line_buf, m.start()) >= pos.column {
                     return index + 1;
                 }
                 index += 1;
@@ -186,19 +225,22 @@ impl FindState {
         index
     }
 
-    /// Count all matches in the entire file.
-    fn count_all_matches(re: &regex_lite::Regex, buffer: &GapBuffer) -> usize {
+    /// Count all matches in the entire file, and the lines skipped because
+    /// they are not valid UTF-8.
+    fn count_all_matches(re: &regex_lite::Regex, buffer: &GapBuffer) -> (usize, usize) {
         let line_count = buffer.line_count();
         let mut count = 0;
+        let mut skipped = 0;
         let mut line_buf = Vec::new();
         for line_idx in 0..line_count {
             buffer.line_text_into(line_idx, &mut line_buf);
             let Ok(text) = std::str::from_utf8(&line_buf) else {
+                skipped += 1;
                 continue;
             };
             count += re.find_iter(text).count();
         }
-        count
+        (count, skipped)
     }
 
     /// Search forward from `from` (inclusive), wrapping around the file.
@@ -210,10 +252,12 @@ impl FindState {
         let line_count = buffer.line_count();
         let mut line_buf = Vec::new();
         for pass in 0..2 {
+            // The wrap pass includes the starting line: pass 0 only saw its text
+            // from `from.column`, so a match before the column is found here.
             let (start, end) = if pass == 0 {
                 (from.line, line_count)
             } else {
-                (0, from.line)
+                (0, (from.line + 1).min(line_count))
             };
             for line_idx in start..end {
                 buffer.line_text_into(line_idx, &mut line_buf);
@@ -227,8 +271,9 @@ impl FindState {
                     0
                 };
                 if let Some(m) = re.find_at(text, byte_start) {
-                    let start_col = buffer::character_count(&line_buf[..m.start()]);
-                    let end_col = buffer::character_count(&line_buf[..m.end()]);
+                    let mut columns = ColumnCursor::new();
+                    let start_col = columns.column_at(&line_buf, m.start());
+                    let end_col = columns.column_at(&line_buf, m.end());
                     return Some((
                         TextPosition::new(line_idx, start_col),
                         TextPosition::new(line_idx, end_col),
@@ -248,10 +293,13 @@ impl FindState {
         let line_count = buffer.line_count();
         let mut line_buf = Vec::new();
         for pass in 0..2 {
+            // The wrap pass starts at the cursor line: earlier lines were already
+            // searched in pass 0, and the cursor line may hold matches after the
+            // cursor that pass 0 excluded.
             let (start, end) = if pass == 0 {
-                (0, from.line + 1)
+                (0, (from.line + 1).min(line_count))
             } else {
-                (0, line_count)
+                (from.line.min(line_count - 1), line_count)
             };
             for line_idx in (start..end).rev() {
                 buffer.line_text_into(line_idx, &mut line_buf);
@@ -261,9 +309,10 @@ impl FindState {
                 // Walk re.find_at() to find the last match on this line
                 let mut best: Option<(TextPosition, TextPosition)> = None;
                 let mut at = 0;
+                let mut columns = ColumnCursor::new();
                 while let Some(m) = re.find_at(text, at) {
-                    let start_col = buffer::character_count(&line_buf[..m.start()]);
-                    let end_col = buffer::character_count(&line_buf[..m.end()]);
+                    let start_col = columns.column_at(&line_buf, m.start());
+                    let end_col = columns.column_at(&line_buf, m.end());
                     if pass == 0 && line_idx == from.line && end_col >= from.column {
                         break;
                     }
@@ -271,11 +320,12 @@ impl FindState {
                         TextPosition::new(line_idx, start_col),
                         TextPosition::new(line_idx, end_col),
                     ));
-                    // Advance past this match (at least 1 byte to avoid infinite loop)
+                    // Advance past this match; an empty match steps over one whole
+                    // character so `at` never lands inside a UTF-8 sequence.
                     at = if m.end() > m.start() {
                         m.end()
                     } else {
-                        m.end() + 1
+                        m.end() + text[m.end()..].chars().next().map_or(1, char::len_utf8)
                     };
                     if at >= text.len() {
                         break;
@@ -329,6 +379,7 @@ impl FindState {
         self.current_index = 0;
         self.total_count = 0;
         self.total_count_known = false;
+        self.skipped_invalid_lines = 0;
         self.viewport_cache = None;
         current
     }
@@ -387,5 +438,118 @@ mod tests {
         find.refresh_viewport_matches(&buffer, &viewport);
 
         assert_eq!(find.matches.len(), 2);
+    }
+
+    fn regex(pattern: &str) -> regex_lite::Regex {
+        FindState::compile_regex(pattern).unwrap()
+    }
+
+    fn span(line: usize, start: usize, end: usize) -> Option<(TextPosition, TextPosition)> {
+        Some((TextPosition::new(line, start), TextPosition::new(line, end)))
+    }
+
+    #[test]
+    fn forward_wraps_to_single_match_on_cursor_line() {
+        let buffer = GapBuffer::from_bytes(b"foo bar".to_vec());
+        let found = FindState::search_forward(&buffer, &regex("foo"), TextPosition::new(0, 5));
+        assert_eq!(found, span(0, 0, 3));
+    }
+
+    #[test]
+    fn forward_prefers_later_lines_over_earlier_match_on_cursor_line() {
+        let buffer = GapBuffer::from_bytes(b"foo foo\nbar\nfoo".to_vec());
+        let re = regex("foo");
+        assert_eq!(
+            FindState::search_forward(&buffer, &re, TextPosition::new(0, 5)),
+            span(2, 0, 3)
+        );
+        // From the last line's only match the search wraps to the first line.
+        assert_eq!(
+            FindState::search_forward(&buffer, &re, TextPosition::new(2, 1)),
+            span(0, 0, 3)
+        );
+        // Within a line it returns the next match, not the first one.
+        assert_eq!(
+            FindState::search_forward(&buffer, &re, TextPosition::new(0, 1)),
+            span(0, 4, 7)
+        );
+    }
+
+    #[test]
+    fn forward_returns_none_without_matches() {
+        let buffer = GapBuffer::from_bytes(b"foo bar".to_vec());
+        assert_eq!(
+            FindState::search_forward(&buffer, &regex("zzz"), TextPosition::new(0, 5)),
+            None
+        );
+    }
+
+    #[test]
+    fn backward_wraps_to_single_match_on_cursor_line() {
+        let buffer = GapBuffer::from_bytes(b"bar foo".to_vec());
+        let re = regex("foo");
+        assert_eq!(
+            FindState::search_backward(&buffer, &re, TextPosition::new(0, 2)),
+            span(0, 4, 7)
+        );
+        // At the start of the only match, wrapping lands on it again.
+        assert_eq!(
+            FindState::search_backward(&buffer, &re, TextPosition::new(0, 4)),
+            span(0, 4, 7)
+        );
+    }
+
+    #[test]
+    fn backward_prefers_earlier_lines_and_last_match_on_cursor_line() {
+        let buffer = GapBuffer::from_bytes(b"foo\nfoo foo bar\nfoo".to_vec());
+        let re = regex("foo");
+        assert_eq!(
+            FindState::search_backward(&buffer, &re, TextPosition::new(1, 5)),
+            span(1, 0, 3)
+        );
+        assert_eq!(
+            FindState::search_backward(&buffer, &re, TextPosition::new(1, 0)),
+            span(0, 0, 3)
+        );
+        assert_eq!(
+            FindState::search_backward(&buffer, &re, TextPosition::new(0, 0)),
+            span(2, 0, 3)
+        );
+    }
+
+    #[test]
+    fn columns_count_characters_not_bytes() {
+        let buffer = GapBuffer::from_bytes("é foo é foo".as_bytes().to_vec());
+        let found = FindState::search_forward(&buffer, &regex("foo"), TextPosition::new(0, 5));
+        assert_eq!(found, span(0, 8, 11));
+        let mut find = FindState::new();
+        find.update_highlights("foo", &buffer, &Viewport::new(80, 24));
+        assert_eq!(find.matches, vec![span(0, 2, 5).unwrap(), span(0, 8, 11).unwrap()]);
+    }
+
+    #[test]
+    fn skipped_invalid_lines_are_counted_and_reset_per_search() {
+        let buffer = GapBuffer::from_bytes(b"foo\n\xff foo\nfoo\n\xfe\nbar".to_vec());
+        let viewport = Viewport::new(80, 24);
+        let mut find = FindState::new();
+        find.update_highlights("foo", &buffer, &viewport);
+        assert_eq!(find.total_count, 2);
+        assert_eq!(find.skipped_invalid_lines(), 2);
+
+        find.update_highlights_lazy("foo", &buffer, &viewport);
+        assert_eq!(find.skipped_invalid_lines(), 0);
+
+        find.update_highlights("foo", &buffer, &viewport);
+        find.clear();
+        assert_eq!(find.skipped_invalid_lines(), 0);
+    }
+
+    #[test]
+    fn search_backward_steps_over_whole_characters_on_empty_matches() {
+        // An empty-matching pattern on non-ASCII text must not resume the
+        // scan inside a multi-byte character.
+        let buffer = GapBuffer::from_bytes("éé".as_bytes().to_vec());
+        let found = FindState::search_backward(&buffer, &regex("x*"), TextPosition::new(0, 2));
+        assert!(found.is_some());
     }
 }
