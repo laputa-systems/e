@@ -31,7 +31,6 @@ test-ci:
 	$(call cargo,test) test --quiet --release $(TEST_TARGETS)
 
 lint:
-	cargo fmt --all
 	cargo clippy --fix --allow-dirty --all-targets --all-features -- --deny warnings
 
 release:
