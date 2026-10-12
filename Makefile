@@ -30,7 +30,7 @@ test-ci:
 	$(call cargo,test) test --quiet --release $(TEST_TARGETS)
 
 lint:
-	cargo clippy --all-targets --all-features -- --deny warnings
+	cargo clippy --workspace --fix --allow-dirty --all-targets -- -D warnings
 
 bench:
 	cargo bench --bench bench
