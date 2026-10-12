@@ -27,7 +27,7 @@ main.rs → Editor → Document → GapBuffer
 - `src/viewport.rs` — `Viewport`, soft-wrap scrolling, screen mapping, and resize anchors.
 - `src/render.rs` — ANSI rendering, syntax-state caching, dirty rows, and reusable scratch buffers.
 - `src/find.rs` — `FindState`, regex compilation, viewport match caching, and navigation.
-- `../hi-lite/src/language.rs` — canonical language registry, filename/shebang detection, and comment syntax; the application delegates to it.
+- `../hi-lite/src/language.rs` — canonical language registry, filename/shebang detection, and comment syntax; the application delegates to it through the `laputa-hi-lite` dependency, which `Cargo.toml` resolves from crates.io (0.2.x), not from the sibling path, so sibling changes reach the editor only after a publish and version bump.
 - `../hi-lite/` — reusable `Kind`, opaque `State`, language selection, line highlighter, byte/character mapping, and storage-agnostic bracket matching.
 - `../hi-lite/src/languages/` — private static per-language rule tables; the XSH vocabulary is a generated region inside `xsh.rs`.
 - `src/operation.rs` — `UndoOperation`, `UndoGroup`, and `UndoStack`.
@@ -113,7 +113,8 @@ their type and scope make the meaning unambiguous.
 
 ## Benchmarks
 
-Use `make bench` for host-keyed timing/allocation baselines.
+Run `cargo bench --bench bench` (rustybench harness). `benches/baseline.json` records one
+host-keyed timing/allocation baseline (macOS aarch64); no Makefile target or CI step compares against it.
 
 ## Configuration and persistence
 

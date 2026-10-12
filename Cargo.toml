@@ -16,7 +16,8 @@ rustybench = "0.1"
 laputa-ptytest = "0.1.1"
 proptest = "1"
 # Dev-only tooling: `examples/gen_xsh.rs` parses the XSH registry source with
-# `syn` to regenerate src/xsh_lang.rs; `tests/xsh_lang.rs` verifies freshness.
+# `syn` to regenerate the vocabulary region of ../hi-lite/src/languages/xsh.rs;
+# `tests/xsh_lang.rs` verifies freshness when the registry checkout exists.
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = "1"
 

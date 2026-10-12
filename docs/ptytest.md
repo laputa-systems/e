@@ -4,7 +4,7 @@
 retains editor keys, fixtures, recording, and cell/style assertions; PTY spawn,
 nonblocking I/O, terminal parsing, and cleanup belong to the shared crate.
 
-Run the suite with `cargo test --test e2e`. It uses a validated `C.UTF-8`
+Run the suite with `cargo test --test e2e`. Set `E_TEST_BINARY` to a path to test a prebuilt binary instead of the cargo-built one (`make test-ci` does this with the release build). It uses a validated `C.UTF-8`
 hermetic environment and the audited `xterm-minimal-v1` output profile. Use
 named screen/state barriers for redraws rather than adding a delay.
 
