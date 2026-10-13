@@ -1,10 +1,5 @@
 use super::harness::*;
 
-// ==========================================================================
-// Section 16: Save — Ctrl+S, save-as, mkdir -p, trailing whitespace strip
-// Section 17: Quit — Ctrl+Q, dirty confirmation
-// ==========================================================================
-
 #[test]
 fn save_writes_file() {
     let dir = TempDir::new();

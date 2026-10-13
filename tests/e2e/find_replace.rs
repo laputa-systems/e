@@ -1,10 +1,5 @@
 use super::harness::*;
 
-// ==========================================================================
-// Section 12: Find — Ctrl+F, live search, browse mode, match highlighting
-// Section 13: Replace all
-// ==========================================================================
-
 #[test]
 fn find_opens_prompt() {
     let dir = TempDir::new();

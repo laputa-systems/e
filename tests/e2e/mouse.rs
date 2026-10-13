@@ -1,9 +1,5 @@
 use super::harness::*;
 
-// ==========================================================================
-// Section 18: Mouse — click, double-click, triple-click, drag, scroll
-// ==========================================================================
-
 #[test]
 fn click_places_cursor() {
     let dir = TempDir::new();

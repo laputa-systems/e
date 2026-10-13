@@ -1,12 +1,5 @@
 use super::harness::*;
 
-// ==========================================================================
-// Section 3: Display — layout, soft-wrap, trailing whitespace highlight
-// Section 4: Syntax highlighting (basic checks)
-// Section 5: Bracket/quote matching
-// Section 20: Keybinding configuration
-// ==========================================================================
-
 #[test]
 fn status_bar_layout() {
     let dir = TempDir::new();

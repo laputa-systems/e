@@ -1,11 +1,5 @@
 use super::harness::*;
 
-// ==========================================================================
-// Section 8: Editing — character insertion, Enter, Backspace, Delete,
-//            Kill line, Duplicate line, Tab, auto-close, skip-over, dedent
-// Section 9: Comment toggle (Ctrl+D)
-// ==========================================================================
-
 #[test]
 fn type_characters() {
     let mut e = TestEditor::new(&[]);

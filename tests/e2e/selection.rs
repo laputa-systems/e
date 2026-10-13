@@ -1,9 +1,5 @@
 use super::harness::*;
 
-// ==========================================================================
-// Section 6: Selection — Shift+arrows, Ctrl+Shift, Ctrl+A, Ctrl+W, collapse
-// ==========================================================================
-
 #[test]
 fn shift_right_creates_selection() {
     let dir = TempDir::new();

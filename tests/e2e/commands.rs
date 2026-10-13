@@ -1,10 +1,5 @@
 use super::harness::*;
 
-// ==========================================================================
-// Section 14: Command palette — Ctrl+P, tab completion, built-in commands
-// Section 15: Command buffer — mini-editor, history
-// ==========================================================================
-
 #[test]
 fn command_palette_opens() {
     let mut e = TestEditor::new(&[]);

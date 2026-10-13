@@ -1,28 +1,50 @@
 # e
 
-my text editor
+e is a minimalist terminal text editor for macOS and Linux. It edits one file at a time.
 
-shares quite a bit of DNA with `micro` but has been radically pared down to intuitive essentials
+## Install
 
-you probably don't want to use this
+Download a pre-release binary for macOS arm64 or Linux x86_64/aarch64 from [Releases](https://github.com/laputa-systems/e/releases). Linux releases include dynamic and static binaries. Extract the archive and put the executable on your `PATH`.
 
-## Build and test
+## Run
 
-- `make build` / `make test` — dev build and the unit plus PTY e2e suites (`cargo test --test e2e` for e2e only).
-- `make release` — pinned-nightly static release build; `make install` copies it to `~/usr/bin`.
-- `make lint` — clippy with `--deny warnings`; it does not modify files.
-- `make bench` — benchmarks.
-- `.github/workflows/ci.yml` runs clippy and `cargo test` on push to `main` and on pull requests.
-- `.github/workflows/release.yml` is manual (`workflow_dispatch`) and builds, tests, and pre-releases macOS arm64 and Linux musl binaries.
-- Release builds use the published `laputa-hi-lite` from crates.io. To try a sibling checkout locally without touching `Cargo.toml`, pass `--config 'patch.crates-io.laputa-hi-lite.path="../hi-lite"'` to cargo; the sibling version must satisfy the `Cargo.toml` requirement (bump it first if the sibling is ahead).
-- The XSH vocabulary generator and its freshness test live in `hi-lite` (`make gen-xsh`).
+Run e in an interactive terminal:
 
-## Files
+```sh
+e [file]
+```
 
-- `~/.config/e/keybindings.ini` — Ctrl-key action overrides.
-- `~/.config/e/undo.bin`, `cursor.bin` — persistent undo history and last cursor position per file.
-- `~/.config/e/locks/` — one lock per open file, held with `flock` so a crashed editor's lock is never stale.
+With no file argument, e opens an unnamed buffer. It can also read a document from standard input:
 
-State files are readable only by you, and `HOME` must be set.
+```sh
+cat notes.txt | e
+```
 
-Syntax highlighting comes from the sibling `hi-lite` crate; see `AGENTS.md` for the architecture and invariants.
+Standard input also opens an unnamed buffer, so `Ctrl+S` prompts for a filename. e asks before opening files larger than 5 MB or files it detects as likely binary.
+
+Use `e --version` to print the version.
+
+`Ctrl+S` saves. An unnamed buffer prompts for a filename. Saving removes trailing spaces and tabs on each line and adds a final newline. If the file changed on disk since it was opened, e refuses to overwrite it. `Ctrl+Q` quits; if the buffer has unsaved changes, e asks whether to save or discard them.
+
+`Ctrl+P` opens the command palette. Commands include `save [file]`, `quit`, `goto <line>`, `find <pattern>`, `replaceall <pattern> <replacement>`, `trim`, `tabstospaces`, and `spacestotabs`.
+
+Common keys include `Ctrl+Z`/`Ctrl+Y` for undo/redo, `Ctrl+A` to select all, `Ctrl+C`/`Ctrl+X`/`Ctrl+V` for copy/cut/paste, and `Ctrl+F` to find. Clipboard commands use the system clipboard when available and an internal clipboard otherwise.
+
+## Configuration
+
+Create `$HOME/.config/e/keybindings.ini` to override Ctrl-key bindings. For example:
+
+```ini
+[keybindings]
+ctrl+s = save
+ctrl+q = quit
+ctrl+f = find
+```
+
+Keys use `ctrl+` followed by one character. Supported actions are `save`, `quit`, `undo`, `redo`, `selectall`, `copy`, `cut`, `paste`, `killline`, `gototop`, `gotoend`, `toggleruler`, `commandpalette`, `gotoline`, `find`, `ctrlbackspace`, `togglecomment`, `duplicateline`, and `selectword`.
+
+e stores key bindings, file locks, undo history, and the last cursor position under `$HOME/.config/e`. `HOME` must be set for these files; e has no shared temporary-directory fallback.
+
+## Help and license
+
+Report problems at [GitHub Issues](https://github.com/laputa-systems/e/issues). e is licensed under the [MIT License](LICENSE).

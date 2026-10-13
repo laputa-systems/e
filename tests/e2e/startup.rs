@@ -1,10 +1,5 @@
 use super::harness::*;
 
-// ==========================================================================
-// Section 1: Startup — empty buffer, file open, language detect, line numbers
-// Section 2: Line endings — CRLF normalization
-// ==========================================================================
-
 #[test]
 fn empty_buffer_shows_status_bar() {
     let mut e = TestEditor::new(&[]);

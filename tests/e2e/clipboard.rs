@@ -1,9 +1,5 @@
 use super::harness::*;
 
-// ==========================================================================
-// Section 10: Clipboard — copy, cut, paste, smart paste, bracketed paste
-// ==========================================================================
-
 #[test]
 fn copy_paste_roundtrip() {
     let dir = TempDir::new();

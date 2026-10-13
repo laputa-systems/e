@@ -1,10 +1,5 @@
 use super::harness::*;
 
-// ==========================================================================
-// Section 7: Movement — arrows, Home/End, Page, Ctrl+T/G, word movement,
-//            desired column, indent stop snapping, line wrapping
-// ==========================================================================
-
 #[test]
 fn arrow_down_moves_cursor() {
     let dir = TempDir::new();
