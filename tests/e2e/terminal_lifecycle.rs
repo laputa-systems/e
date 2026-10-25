@@ -87,3 +87,13 @@ fn sigterm_restores_the_terminal_and_releases_the_lock() {
 fn sighup_restores_the_terminal_and_releases_the_lock() {
     assert_signal_restores_terminal(1);
 }
+
+#[test]
+fn sigint_restores_the_terminal_and_releases_the_lock() {
+    assert_signal_restores_terminal(2);
+}
+
+#[test]
+fn sigquit_restores_the_terminal_and_releases_the_lock() {
+    assert_signal_restores_terminal(3);
+}

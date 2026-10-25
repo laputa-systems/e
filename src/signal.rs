@@ -63,9 +63,14 @@ enum Notify {
     Winch,
     Hangup,
     Terminate,
+    Interrupt,
+    Quit,
     Abort,
     IllegalInstruction,
     Trap,
+    SegmentationFault,
+    BusError,
+    FloatingPointError,
 }
 
 /// `one_shot` restores the default action before the handler runs.
@@ -82,9 +87,14 @@ fn install(notify: Notify, handler: Handler, one_shot: bool) -> io::Result<()> {
             Notify::Winch => Signal::WINCH,
             Notify::Hangup => Signal::HUP,
             Notify::Terminate => Signal::TERM,
+            Notify::Interrupt => Signal::INT,
+            Notify::Quit => Signal::QUIT,
             Notify::Abort => Signal::ABORT,
             Notify::IllegalInstruction => Signal::ILL,
             Notify::Trap => Signal::TRAP,
+            Notify::SegmentationFault => Signal::SEGV,
+            Notify::BusError => Signal::BUS,
+            Notify::FloatingPointError => Signal::FPE,
         };
         let flags = if one_shot {
             KernelSigactionFlags::RESETHAND
@@ -143,9 +153,14 @@ fn install(notify: Notify, handler: Handler, one_shot: bool) -> io::Result<()> {
             Notify::Winch => 28,
             Notify::Hangup => 1,
             Notify::Terminate => 15,
+            Notify::Interrupt => 2,
+            Notify::Quit => 3,
             Notify::Abort => 6,
             Notify::IllegalInstruction => 4,
             Notify::Trap => 5,
+            Notify::SegmentationFault => 11,
+            Notify::BusError => 10,
+            Notify::FloatingPointError => 8,
         };
         // SA_RESETHAND is 0x4 and SA_RESTART 0x2 on Darwin.
         let flags = if one_shot { 0x0004 } else { 0x0002 };
@@ -181,23 +196,31 @@ pub fn register_sigwinch() -> io::Result<()> {
     install(Notify::Winch, sigwinch_handler, false)
 }
 
-/// Ask for a clean shutdown on SIGTERM and SIGHUP (kill, closed ssh session or
-/// terminal window). The event loop polls `termination_requested` so the
-/// terminal modes and lock are restored on the way out.
+/// Ask for a clean shutdown on SIGTERM, SIGHUP, SIGINT, and SIGQUIT (kill,
+/// closed ssh session or terminal window, kill -INT/-QUIT). The event loop
+/// polls `termination_requested` so the terminal modes and lock are restored
+/// on the way out.
 pub fn register_termination() -> io::Result<()> {
     install(Notify::Hangup, termination_handler, false)?;
-    install(Notify::Terminate, termination_handler, false)
+    install(Notify::Terminate, termination_handler, false)?;
+    install(Notify::Interrupt, termination_handler, false)?;
+    install(Notify::Quit, termination_handler, false)
 }
 
 /// Run `cleanup` when the process is about to die from an abort, illegal
-/// instruction, or trap: the ways a Rust panic ends the process when the panic
-/// hook cannot run (`panic=immediate-abort` release builds skip it). `cleanup`
-/// executes in a signal handler, so it may only use async-signal-safe calls.
+/// instruction, trap, segmentation fault, bus error, or floating-point
+/// exception: the ways a Rust panic or a hard crash ends the process when the
+/// panic hook cannot run (`panic=immediate-abort` release builds skip it).
+/// `cleanup` executes in a signal handler, so it may only use
+/// async-signal-safe calls.
 pub fn register_fatal_cleanup(cleanup: fn()) -> io::Result<()> {
     FATAL_CLEANUP.get_or_init(|| cleanup);
     install(Notify::Abort, fatal_handler, true)?;
     install(Notify::IllegalInstruction, fatal_handler, true)?;
-    install(Notify::Trap, fatal_handler, true)
+    install(Notify::Trap, fatal_handler, true)?;
+    install(Notify::SegmentationFault, fatal_handler, true)?;
+    install(Notify::BusError, fatal_handler, true)?;
+    install(Notify::FloatingPointError, fatal_handler, true)
 }
 
 pub fn take_sigwinch() -> bool {

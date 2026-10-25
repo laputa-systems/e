@@ -1,6 +1,6 @@
 # Runtime
 
-`Editor::run()` owns a `TerminalGuard` for raw mode and the alternate screen. The guard restores terminal state on normal exit, drop, and panic. A terminal input thread feeds queued events; the loop drains event bursts and polls resize and termination flags. SIGTERM and SIGHUP exit with an error after terminal restoration.
+`Editor::run()` owns a `TerminalGuard` for raw mode and the alternate screen. The guard restores terminal state on normal exit, drop, and panic. A terminal input thread feeds queued events; the loop drains event bursts and polls resize and termination flags. SIGTERM, SIGHUP, SIGINT, and SIGQUIT exit with an error after terminal restoration; fatal crash signals (abort, illegal instruction, trap, segfault, bus error, floating-point exception) restore the terminal on the way out.
 
 Command input is modal through `CommandBuffer`; ordinary editing operates on `CaretSet`. Editor confirmations for dirty quit, quit-after-save, and reload use a single `Modal` state. Mouse, resize, and key dispatch are handled by the editor.
 

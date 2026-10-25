@@ -256,16 +256,18 @@ impl TestEditor {
         Self::spawn(home, command, 24, 80)
     }
 
-    /// Start the editor from a shell that ignores SIGTERM and SIGHUP, so the
-    /// editor can be signalled without taking the shell down. After the
-    /// editor ends the shell prints its exit status and the terminal's line
-    /// discipline flags (`stty -a`), which `shell_epilogue` reads back.
+    /// Start the editor from a shell that ignores SIGTERM, SIGHUP, SIGINT and
+    /// SIGQUIT, so the editor can be signalled without taking the shell down.
+    /// Ignored dispositions are inherited, so the editor must install its own
+    /// handlers to observe these signals. After the editor ends the shell
+    /// prints its exit status and the terminal's line discipline flags
+    /// (`stty -a`), which `shell_epilogue` reads back.
     pub fn in_shell(args: &[&str]) -> Self {
         let home = Arc::new(TempDir::new());
         let command = CommandSpec::new("/bin/sh")
             .arg("-c")
             .arg(
-                r#"trap "" TERM HUP; editor=$1; shift; "$editor" "$@"; echo "editor-exit=$?"; /bin/stty -a; echo shell-done"#,
+                r#"trap "" TERM HUP INT QUIT; editor=$1; shift; "$editor" "$@"; echo "editor-exit=$?"; /bin/stty -a; echo shell-done"#,
             )
             .arg("sh")
             .arg(selected_binary())
