@@ -24,6 +24,23 @@ signal_handler!(sigwinch_handler, {
 signal_handler!(termination_handler, {
     TERMINATION_REQUESTED.store(true, Ordering::Relaxed);
 });
+#[cfg(target_os = "linux")]
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn sigreturn_restorer() {
+    unsafe {
+        core::arch::asm!("mov rax, 15", "syscall", options(noreturn, nostack));
+    }
+}
+#[cfg(target_os = "linux")]
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" fn sigreturn_restorer() {
+    unsafe {
+        core::arch::asm!("mov x8, #139", "svc #0", options(noreturn, nostack));
+    }
+}
+#[cfg(target_os = "linux")]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("sigreturn_restorer needs the rt_sigreturn syscall number for this architecture");
 // Runs on the way to a crash. The cleanup must be async-signal-safe; the handler
 // is one-shot, so returning from it re-runs the faulting instruction (or lets
 // `abort` finish) under the default action and the process still dies.
@@ -57,7 +74,8 @@ fn install(notify: Notify, handler: Handler, one_shot: bool) -> io::Result<()> {
     {
         use rustix::runtime::Signal;
         use rustix::runtime::{
-            KernelSigSet, KernelSigaction, KernelSigactionFlags, kernel_sigaction,
+            How, KernelSigSet, KernelSigaction, KernelSigactionFlags, kernel_sigaction,
+            kernel_sigprocmask,
         };
 
         let signal = match notify {
@@ -77,14 +95,23 @@ fn install(notify: Notify, handler: Handler, one_shot: bool) -> io::Result<()> {
         // The action uses an empty signal mask and requests SA_RESTART, matching the previous
         // libc implementation. `kernel_sigaction` is unsafe because signal handlers are
         // inherently unsafe and its caller must uphold the platform ABI requirements.
+        // `sigreturn_restorer` invokes only `rt_sigreturn`, which restores the
+        // pre-handler context instead of returning. The signal is unblocked after
+        // the handler is installed so a pending signal meets the new handler,
+        // never the default disposition.
         unsafe {
             let action = KernelSigaction {
                 sa_handler_kernel: Some(handler),
-                sa_flags: flags,
-                sa_restorer: None,
+                sa_flags: flags | KernelSigactionFlags::RESTORER,
+                sa_restorer: Some(sigreturn_restorer),
                 sa_mask: KernelSigSet::empty(),
             };
             kernel_sigaction(signal, Some(action))
+                .map(|_| ())
+                .map_err(io::Error::from)?;
+            let mut unblock = KernelSigSet::empty();
+            unblock.insert(signal);
+            kernel_sigprocmask(How::UNBLOCK, Some(&unblock))
                 .map(|_| ())
                 .map_err(io::Error::from)
         }
@@ -105,6 +132,11 @@ fn install(notify: Notify, handler: Handler, one_shot: bool) -> io::Result<()> {
                 action: *const MacSigaction,
                 old_action: *mut MacSigaction,
             ) -> core::ffi::c_int;
+            fn pthread_sigmask(
+                how: core::ffi::c_int,
+                set: *const u32,
+                oldset: *mut u32,
+            ) -> core::ffi::c_int;
         }
 
         let signal = match notify {
@@ -117,11 +149,14 @@ fn install(notify: Notify, handler: Handler, one_shot: bool) -> io::Result<()> {
         };
         // SA_RESETHAND is 0x4 and SA_RESTART 0x2 on Darwin.
         let flags = if one_shot { 0x0004 } else { 0x0002 };
+        const SIG_UNBLOCK: core::ffi::c_int = 2;
         // SAFETY: The Darwin `sigaction` ABI uses a function pointer, 32-bit signal mask, and
         // integer flags in this order. The handler is a valid C ABI function, the mask is empty,
         // and the old action is not needed. These definitions are kept local because rustix's
         // signal-installation runtime API is Linux-only and libc is intentionally not a
-        // dependency of this crate.
+        // dependency of this crate. `pthread_sigmask` takes the same narrowing
+        // bitmask layout; the signal is unblocked after the handler is installed
+        // so a pending signal meets the new handler, never the default action.
         let status = unsafe {
             let action = MacSigaction {
                 sa_sigaction: handler as *const () as usize,
@@ -130,7 +165,11 @@ fn install(notify: Notify, handler: Handler, one_shot: bool) -> io::Result<()> {
             };
             sigaction(signal, &action, core::ptr::null_mut())
         };
-        if status == 0 {
+        if status != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let bit: u32 = 1u32 << (signal - 1);
+        if unsafe { pthread_sigmask(SIG_UNBLOCK, &bit, core::ptr::null_mut()) } == 0 {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
