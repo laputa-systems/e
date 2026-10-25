@@ -1,6 +1,6 @@
 # Build and release
 
-The Rust toolchain is pinned in `rust-toolchain.toml`. `make build` runs a development build. `make release` builds a stripped static release for `TARGET`; the default is the host target, with Linux defaulting to musl. `make release-dynamic` builds the dynamic Linux variant. `make install` copies the release binary to `~/usr/bin/e` and ad-hoc signs it on macOS.
+The Rust toolchain is pinned in `rust-toolchain.toml`. `make build` runs a development build. `make release` builds a stripped release for `TARGET`; the default is the host target, with Linux defaulting to a statically linked musl binary. `make install` copies the release binary to `~/usr/bin/e` and ad-hoc signs it on macOS.
 
 The `make lint` target passes `--fix` to Clippy and can modify source files. For a read-only check, run `cargo clippy --locked --all-targets --all-features -- --deny warnings`.
 
@@ -10,4 +10,4 @@ Cargo resolves `laputa-hi-lite = "0.2"` from crates.io. Changes in the adjacent 
 
 ## Release workflow
 
-The manual GitHub Actions release workflow builds macOS arm64 and Linux x86_64/aarch64 binaries, tests them, and publishes a pre-release. Linux produces dynamic and static binaries. `Dockerfile` supplies the Linux musl build environment. The CI workflow runs Clippy and tests on pushes to `main` and on pull requests.
+The manual GitHub Actions release workflow builds macOS arm64 and Linux x86_64/aarch64 binaries, tests them, and publishes a pre-release. Before packaging, it rejects Linux binaries with an ELF interpreter or shared-library dependency. `Dockerfile` supplies the Linux musl build environment. The CI workflow runs Clippy and tests on pushes to `main` and on pull requests.

@@ -4,7 +4,7 @@ e is a minimalist terminal text editor for macOS and Linux. It edits one file at
 
 ## Install
 
-Download a pre-release binary for macOS arm64 or Linux x86_64/aarch64 from [Releases](https://github.com/laputa-systems/e/releases). Linux releases include dynamic and static binaries. Extract the archive and put the executable on your `PATH`.
+Download a pre-release binary for macOS arm64 or Linux x86_64/aarch64 from [Releases](https://github.com/laputa-systems/e/releases). Linux binaries are statically linked. Extract the archive and put the executable on your `PATH`.
 
 ## Run
 
