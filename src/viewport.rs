@@ -276,8 +276,7 @@ impl Viewport {
                 start_wrap = 0;
             }
         } else {
-            // Target line wraps enough to fill half the screen on its own
-            let _ = target_wraps; // target line starts at top
+            let _ = target_wraps;
             start_line = line;
             start_wrap = 0;
         }

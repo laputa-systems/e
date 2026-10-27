@@ -6,7 +6,7 @@ The `make lint` target passes `--fix` to Clippy and can modify source files. For
 
 ## hi-lite dependency
 
-Cargo resolves `laputa-hi-lite = "0.2"` from crates.io. Changes in the adjacent [hi-lite repository](https://github.com/laputa-systems/hi-lite) do not affect this app until a compatible version is published and the dependency is updated. For local work, apply a Cargo `[patch.crates-io]` override pointing `laputa-hi-lite` at the checkout; its package version must satisfy `Cargo.toml`. The XSH vocabulary generator and freshness test are also owned by hi-lite.
+Cargo resolves `laputa-hi-lite = "0.2"` from crates.io. Changes in the adjacent [hi-lite repository](https://github.com/laputa-systems/hi-lite) do not affect this app until a compatible version is published and the dependency is updated. For local work, apply a Cargo `[patch.crates-io]` override pointing `laputa-hi-lite` at the checkout; its package version must satisfy `Cargo.toml`.
 
 ## Release workflow
 

@@ -30,7 +30,7 @@ impl Editor {
         if self.document.is_dirty {
             let name = self.document.file_path.as_deref().unwrap_or("[scratch]");
             self.status_message = format!("Save changes to {}? (y/n)", name);
-            self.status_time = None; // don't expire this message
+            self.status_time = None;
             self.modal = Modal::ConfirmQuit;
         } else {
             self.quit();

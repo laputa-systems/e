@@ -863,7 +863,6 @@ impl Editor {
             Key::Char('\t') => self.insert_tab(),
             Key::BackTab => self.dedent(),
             Key::Char('\n') => self.insert_newline(),
-            // Ctrl+J (0x0A) arrives as Key::Null via CtrlJReader (0x0A → 0x00).
             Key::Null => self.duplicate_line(),
             Key::Char(c) => self.insert_char(c),
             _ => {}
@@ -874,7 +873,6 @@ impl Editor {
     // -- command buffer key handling ----------------------------------------
 
     fn handle_cmd_key(&mut self, key: Key) {
-        // Key::Null = Ctrl+J (0x0A via CtrlJReader); treat as Enter in command buffer.
         let key = if key == Key::Null {
             Key::Char('\n')
         } else {
@@ -1115,7 +1113,7 @@ impl Editor {
 
     fn set_find_status(&mut self) {
         self.status_message = format!("{}{}", self.find.status_text(), self.skipped_lines_note());
-        self.status_time = None; // don't auto-expire while browsing
+        self.status_time = None;
     }
 
     /// Find cannot match text that is not valid UTF-8; say so rather than let a

@@ -1,9 +1,9 @@
 use rustix::termios::{self, OptionalActions, Termios};
 /// Terminal input parser: raw mode, terminal size, and byte→event decoding.
 ///
-/// Replaces termion. Uses rustix::termios for raw mode and terminal size.
-/// Parses VT100/xterm key sequences, mouse events, bracketed paste, and
-/// focus events from raw stdin bytes.
+/// Uses rustix::termios for raw mode and terminal size. Parses VT100/xterm
+/// key sequences, mouse events, bracketed paste, and focus events from raw
+/// stdin bytes.
 use std::io;
 
 // ── Key type ──────────────────────────────────────────────────────────────
@@ -202,7 +202,7 @@ impl InputParser {
             0x1C..=0x1F => EditorEvent::Key(Key::Ctrl((byte + 0x40) as char)),
             0x20..=0x7E => EditorEvent::Key(Key::Char(byte as char)),
             0x7F => EditorEvent::Key(Key::Backspace),
-            _ => EditorEvent::Key(Key::Null), // ignored
+            _ => EditorEvent::Key(Key::Null),
         }
     }
 

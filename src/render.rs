@@ -352,8 +352,6 @@ impl Renderer {
                     self.hl_dirty_from = 0;
                 }
                 self.hl_cache_version = buf_version;
-                // Only XSH has user-declared types; other languages skip the
-                // whole-buffer scan.
                 if self.language == Some(Language::Xsh) {
                     let may_define_type = dirty < line_count && {
                         buffer.line_text_into(dirty, &mut self.line_buf);

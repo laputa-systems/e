@@ -369,7 +369,6 @@ mod tests {
     fn test_history_empty() {
         let mut cb = CommandBuffer::new();
         cb.open(CommandBufferMode::Command, "> ", "");
-        // Up with no history should do nothing
         cb.handle_key(Key::Up);
         assert_eq!(cb.input, "");
     }
@@ -432,7 +431,6 @@ mod tests {
         let mut cb = CommandBuffer::new();
         cb.history = vec!["first".to_string()];
         cb.open(CommandBufferMode::Command, "> ", "");
-        // Down without having navigated up should do nothing
         cb.handle_key(Key::Down);
         assert_eq!(cb.input, "");
     }
