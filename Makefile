@@ -52,9 +52,9 @@ verify-release:
 	fi
 
 install: release
-	cp target/$(TARGET)/dist/$(NAME) ~/usr/bin/$(NAME)
+	cp target/$(TARGET)/dist/$(NAME) ~/.local/bin/$(NAME)
 	@if test "$$(uname -s)" = Darwin; then \
-		codesign -fs - ~/usr/bin/$(NAME); \
+		codesign -fs - ~/.local/bin/$(NAME); \
 	fi
 
 # Record e2e tests as asciicast .cast files (single-threaded for clean capture)

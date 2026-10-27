@@ -1,6 +1,6 @@
 # Build and release
 
-The Rust toolchain is pinned in `rust-toolchain.toml`. `make build` runs a development build. `make release` builds a stripped release for `TARGET`; the default is the host target, with Linux defaulting to a statically linked musl binary. `make install` copies the release binary to `~/usr/bin/e` and ad-hoc signs it on macOS.
+The Rust toolchain is pinned in `rust-toolchain.toml`. `make build` runs a development build. `make release` builds a stripped release for `TARGET`; the default is the host target, with Linux defaulting to a statically linked musl binary. `make install` copies the release binary to `~/.local/bin/e` and ad-hoc signs it on macOS.
 
 The `make lint` target passes `--fix` to Clippy and can modify source files. For a read-only check, run `cargo clippy --locked --all-targets --all-features -- --deny warnings`.
 
