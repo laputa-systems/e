@@ -188,7 +188,7 @@ impl Editor {
             match fs::create_dir_all(parent) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                    return self.start_sudo_save(path);
+                    return self.start_sudo_save(path, self.expected_mtime_for_save(path));
                 }
                 Err(e) => {
                     self.set_status(format!("Error creating dirs: {}", e));
@@ -200,22 +200,28 @@ impl Editor {
         // Saving under a different name overwrites whatever is there on
         // purpose; only the document's own file is protected against changes
         // made behind the editor's back.
-        let expected_mtime = if self.document.file_path.as_deref() == Some(path) {
-            self.file_modification_time
-        } else {
-            file_io::file_modification_time(path_ref)
-        };
+        let expected_mtime = self.expected_mtime_for_save(path);
         let cleaned = file_io::clean_for_write(&self.document.buffer.contents());
         match file_io::write_file(path_ref, &cleaned, expected_mtime) {
             Ok(()) => {
                 self.finish_save(path, "");
                 SaveOutcome::Saved
             }
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => self.start_sudo_save(path),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                self.start_sudo_save(path, expected_mtime)
+            }
             Err(e) => {
                 self.set_status(format!("Error saving: {}", e));
                 SaveOutcome::Failed
             }
+        }
+    }
+
+    fn expected_mtime_for_save(&self, path: &str) -> Option<std::time::SystemTime> {
+        if self.document.file_path.as_deref() == Some(path) {
+            self.file_modification_time
+        } else {
+            file_io::file_modification_time(Path::new(path))
         }
     }
 
@@ -236,11 +242,16 @@ impl Editor {
 
     /// Keep the cleaned bytes in memory while the sudo password is asked for,
     /// instead of staging them in a world-readable temporary file.
-    fn start_sudo_save(&mut self, path: &str) -> SaveOutcome {
+    fn start_sudo_save(
+        &mut self,
+        path: &str,
+        expected_mtime: Option<std::time::SystemTime>,
+    ) -> SaveOutcome {
         let contents = self.document.buffer.contents();
         self.sudo_save = Some(SudoSave {
             path: path.to_string(),
             cleaned: file_io::clean_for_write(&contents),
+            expected_mtime,
         });
         let prompt = format!("sudo password (to save {}): ", path);
         self.command_buffer
@@ -249,7 +260,12 @@ impl Editor {
     }
 
     pub(super) fn save_file_sudo(&mut self, password: &str) -> SaveOutcome {
-        let Some(SudoSave { path, cleaned }) = self.sudo_save.take() else {
+        let Some(SudoSave {
+            path,
+            cleaned,
+            expected_mtime,
+        }) = self.sudo_save.take()
+        else {
             return SaveOutcome::Failed;
         };
         let path_ref = Path::new(&path);
@@ -275,6 +291,10 @@ impl Editor {
             }
         }
 
+        if file_io::file_modification_time(path_ref) != expected_mtime {
+            self.set_status(format!("Error saving: {}", file_io::changed_on_disk_error()));
+            return SaveOutcome::Failed;
+        }
         // `tee` truncates in place, so the file keeps its owner and mode, and
         // taking the content on stdin avoids a staging file other users could read.
         if run_sudo(&["-n", "tee", "--", &path], &cleaned) {
@@ -294,7 +314,7 @@ impl Editor {
 
 /// Run `sudo <args>` with `input` on stdin; true when it exits successfully.
 fn run_sudo(args: &[&str], input: &[u8]) -> bool {
-    let spawned = Command::new("sudo")
+    let spawned = Command::new(sudo_program())
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -309,4 +329,34 @@ fn run_sudo(args: &[&str], input: &[u8]) -> bool {
         let _ = stdin.write_all(input);
     }
     child.wait().is_ok_and(|status| status.success())
+}
+
+fn sudo_program() -> std::ffi::OsString {
+    #[cfg(test)]
+    if let Some(program) = SUDO_PROGRAM.with(|slot| slot.borrow().clone()) {
+        return program;
+    }
+    std::ffi::OsString::from("sudo")
+}
+
+#[cfg(test)]
+thread_local! {
+    static SUDO_PROGRAM: std::cell::RefCell<Option<std::ffi::OsString>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) struct SudoProgramGuard;
+
+#[cfg(test)]
+impl Drop for SudoProgramGuard {
+    fn drop(&mut self) {
+        SUDO_PROGRAM.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn override_sudo_program(program: &Path) -> SudoProgramGuard {
+    SUDO_PROGRAM.with(|slot| *slot.borrow_mut() = Some(program.as_os_str().to_os_string()));
+    SudoProgramGuard
 }

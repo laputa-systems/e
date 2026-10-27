@@ -150,6 +150,7 @@ enum Modal {
 struct SudoSave {
     path: String,
     cleaned: Vec<u8>,
+    expected_mtime: Option<std::time::SystemTime>,
 }
 
 impl Editor {

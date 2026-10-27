@@ -71,9 +71,7 @@ pub fn write_file(
         Err(e) => return Err(e),
     };
     if file_modification_time(&target) != expected_mtime {
-        return Err(io::Error::other(
-            "file changed on disk since it was loaded",
-        ));
+        return Err(changed_on_disk_error());
     }
     let meta = match fs::metadata(&target) {
         Ok(meta) => meta,
@@ -343,6 +341,10 @@ pub fn file_size(path: &Path) -> io::Result<u64> {
 /// File modification time, or None if unavailable.
 pub fn file_modification_time(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).ok()?.modified().ok()
+}
+
+pub(crate) fn changed_on_disk_error() -> io::Error {
+    io::Error::other("file changed on disk since it was loaded")
 }
 
 // -- persistent undo history ------------------------------------------------

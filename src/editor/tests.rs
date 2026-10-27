@@ -885,6 +885,7 @@ fn test_handle_cmd_result_cancel_sudo() {
     e.sudo_save = Some(SudoSave {
         path: "/tmp/nonexistent_test_file".to_string(),
         cleaned: b"secret".to_vec(),
+        expected_mtime: None,
     });
     e.handle_cmd_result(CommandBufferMode::SudoSave, CommandBufferResult::Cancel);
     assert!(e.sudo_save.is_none());
@@ -2507,6 +2508,7 @@ fn test_handle_cmd_result_sudo_cancel_cleans_tmp() {
     e.sudo_save = Some(SudoSave {
         path: "/tmp/e_test_sudo_fake".to_string(),
         cleaned: Vec::new(),
+        expected_mtime: None,
     });
     e.handle_cmd_result(
         crate::command_buffer::CommandBufferMode::SudoSave,
@@ -2635,6 +2637,54 @@ fn test_focus_in_event() {
 
     e.dispatch_event(EditorEvent::FocusIn);
     assert_eq!(e.modal, Modal::ConfirmReload);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_sudo_save_refuses_when_file_changed_during_prompt() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join("e_test_sudo_mtime");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("owned.txt");
+    std::fs::write(&path, b"newer\n").unwrap();
+    let log = dir.join("sudo.log");
+    let stub = dir.join("sudo");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"-S\" ]; then\ncat >/dev/null\nexit 0\nfi\nif [ \"$1\" = \"-n\" ] && [ \"$2\" = \"tee\" ]; then\ncat > \"$4\"\nexit 0\nfi\nexit 1\n",
+        log.display()
+    );
+    std::fs::write(&stub, script).unwrap();
+    let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&stub, perms).unwrap();
+    let _guard = super::file_session::override_sudo_program(&stub);
+
+    let mut e = ed("mine");
+    e.sudo_save = Some(SudoSave {
+        path: path.to_str().unwrap().to_string(),
+        cleaned: b"mine\n".to_vec(),
+        expected_mtime: Some(std::time::SystemTime::UNIX_EPOCH),
+    });
+    let outcome = e.save_file_sudo("secret");
+
+    assert_eq!(outcome, super::file_session::SaveOutcome::Failed);
+    assert_eq!(
+        e.status_message,
+        "Error saving: file changed on disk since it was loaded"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"newer\n");
+    let log_text = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        log_text.lines().any(|line| line.starts_with("-S ")),
+        "{log_text}"
+    );
+    assert!(
+        log_text.lines().all(|line| !line.contains("tee")),
+        "{log_text}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
