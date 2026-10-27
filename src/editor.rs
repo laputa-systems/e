@@ -1181,14 +1181,14 @@ impl Editor {
 
         let new_text = re.replace_all(text, replacement).into_owned();
 
-        self.document.seal_undo();
+        self.document.begin_undo_group();
         self.document.replace_range_with_deleted(
             range_start,
             range_end,
             new_text.as_bytes(),
             text_bytes,
         );
-        self.document.seal_undo();
+        self.document.end_undo_group();
 
         self.clear_selection();
         self.set_status(format!("Replaced {} occurrences", count));

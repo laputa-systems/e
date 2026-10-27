@@ -650,6 +650,19 @@ fn test_replace_all_invalid_regex() {
     assert!(e.status_message.contains("Invalid regex"));
 }
 
+#[test]
+fn test_replace_all_is_one_undo_group() {
+    let mut e = ed("foo bar foo\n");
+    e.set_cursor(TextPosition::new(0, 11));
+    e.insert_char('!');
+    e.replace_all("foo", "XXX");
+    assert_eq!(e.test_text(), "XXX bar XXX!\n");
+    e.undo();
+    assert_eq!(e.test_text(), "foo bar foo!\n");
+    e.undo();
+    assert_eq!(e.test_text(), "foo bar foo\n");
+}
+
 
 #[test]
 fn test_goto_line_in_range() {

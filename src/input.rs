@@ -130,6 +130,11 @@ pub struct InputParser {
     paste_saw_cr: bool,
     /// Number of consecutive bytes matched against PASTE_END_MARKER.
     paste_term_match: u8,
+    /// Lead and continuation bytes of a ground-state UTF-8 character.
+    utf8_buf: [u8; 4],
+    utf8_filled: u8,
+    /// Expected length of the character in `utf8_buf`, or 0 when idle.
+    utf8_expect: u8,
 }
 
 impl Default for InputParser {
@@ -147,6 +152,9 @@ impl InputParser {
             paste_buf: Vec::new(),
             paste_saw_cr: false,
             paste_term_match: 0,
+            utf8_buf: [0; 4],
+            utf8_filled: 0,
+            utf8_expect: 0,
         }
     }
 
@@ -172,6 +180,10 @@ impl InputParser {
             return self.advance_paste(byte);
         }
 
+        if self.utf8_expect > 0 {
+            return self.advance_utf8(byte);
+        }
+
         // ── Escape-sequence buffering ─────────────────────────────────
         if self.buf_len > 0 {
             return self.advance_esc(byte);
@@ -185,7 +197,45 @@ impl InputParser {
         }
 
         // ── Ground-state byte ─────────────────────────────────────────
+        if let Some(expect) = Self::utf8_sequence_len(byte) {
+            self.utf8_buf[0] = byte;
+            self.utf8_filled = 1;
+            self.utf8_expect = expect;
+            return None;
+        }
         Some(Self::ground_key(byte))
+    }
+
+    fn utf8_sequence_len(lead: u8) -> Option<u8> {
+        match lead {
+            0xC2..=0xDF => Some(2),
+            0xE0..=0xEF => Some(3),
+            0xF0..=0xF4 => Some(4),
+            _ => None,
+        }
+    }
+
+    fn advance_utf8(&mut self, byte: u8) -> Option<EditorEvent> {
+        if byte & 0xC0 != 0x80 {
+            self.utf8_filled = 0;
+            self.utf8_expect = 0;
+            return self.advance(byte);
+        }
+        self.utf8_buf[self.utf8_filled as usize] = byte;
+        self.utf8_filled += 1;
+        if self.utf8_filled < self.utf8_expect {
+            return None;
+        }
+        let len = self.utf8_filled as usize;
+        self.utf8_filled = 0;
+        self.utf8_expect = 0;
+        let Ok(text) = std::str::from_utf8(&self.utf8_buf[..len]) else {
+            return Some(EditorEvent::Key(Key::Null));
+        };
+        let Some(ch) = text.chars().next() else {
+            return Some(EditorEvent::Key(Key::Null));
+        };
+        Some(EditorEvent::Key(Key::Char(ch)))
     }
 
     /// Map a ground-state byte to a key event.
@@ -634,6 +684,29 @@ mod tests {
         let events = parse_bytes(&[0x00]);
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], EditorEvent::Key(Key::Null)));
+    }
+
+    #[test]
+    fn test_utf8_ground_decodes_to_one_char() {
+        let mut parser = InputParser::new();
+        assert!(parser.advance(0xE2).is_none());
+        assert!(parser.advance(0x82).is_none());
+        assert!(!parser.needs_flush());
+        assert!(matches!(
+            parser.advance(0xAC),
+            Some(EditorEvent::Key(Key::Char('€')))
+        ));
+        assert!(matches!(
+            parser.advance(0x00),
+            Some(EditorEvent::Key(Key::Null))
+        ));
+        assert!(matches!(
+            parser.advance(0x0A),
+            Some(EditorEvent::Key(Key::Null))
+        ));
+        let events = parse_bytes("é".as_bytes());
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], EditorEvent::Key(Key::Char('é'))));
     }
 
     // ── Escape handling ───────────────────────────────────────────────
