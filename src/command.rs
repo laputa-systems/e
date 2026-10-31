@@ -1,5 +1,5 @@
 /// Command registry: maps command names to functions.
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 
 /// Parse a command argument string into tokens, respecting single and double quotes.
 /// Unquoted tokens are split on whitespace. Quoted tokens preserve interior whitespace

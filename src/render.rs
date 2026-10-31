@@ -233,7 +233,7 @@ impl Renderer {
     /// Rescan all lines for `type` declarations.  The scan is gated by the
     /// buffer-version check in `render()`, so it only runs after edits.
     fn update_user_types(&mut self, buffer: &mut crate::buffer::GapBuffer, line_count: usize) {
-        let mut seen = fxhash::FxHashSet::default();
+        let mut seen = rustc_hash::FxHashSet::default();
         self.user_types.clear();
         let mut in_continuation = false;
         for line_idx in 0..line_count {
