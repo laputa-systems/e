@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::input::Key;
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EditorAction {
