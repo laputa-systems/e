@@ -1166,9 +1166,22 @@ mod tests {
 }
 
 #[cfg(test)]
-mod proptests {
+mod properties {
     use super::*;
-    use proptest::prelude::*;
+    use quickcheck::{Arbitrary, Gen, QuickCheck};
+
+    fn check<T: quickcheck::Testable>(property: T) {
+        QuickCheck::new().tests(256).quickcheck(property);
+    }
+
+    fn bytes_up_to(g: &mut Gen, max_len: usize) -> Vec<u8> {
+        let len = usize::arbitrary(g) % (max_len + 1);
+        (0..len).map(|_| u8::arbitrary(g)).collect()
+    }
+
+    fn unit_fraction(g: &mut Gen) -> f64 {
+        f64::from(u32::arbitrary(g)) / (f64::from(u32::MAX) + 1.0)
+    }
 
     /// An edit operation for property testing.
     #[derive(Debug, Clone)]
@@ -1177,13 +1190,36 @@ mod proptests {
         Delete { pos_frac: f64, len_frac: f64 },
     }
 
-    fn arb_edit_op() -> impl Strategy<Value = EditOp> {
-        prop_oneof![
-            (any::<f64>(), prop::collection::vec(any::<u8>(), 0..32))
-                .prop_map(|(pos_frac, data)| EditOp::Insert { pos_frac, data }),
-            (any::<f64>(), any::<f64>())
-                .prop_map(|(pos_frac, len_frac)| EditOp::Delete { pos_frac, len_frac }),
-        ]
+    impl Arbitrary for EditOp {
+        fn arbitrary(g: &mut Gen) -> Self {
+            if bool::arbitrary(g) {
+                EditOp::Insert {
+                    pos_frac: f64::arbitrary(g),
+                    data: bytes_up_to(g, 31),
+                }
+            } else {
+                EditOp::Delete {
+                    pos_frac: f64::arbitrary(g),
+                    len_frac: f64::arbitrary(g),
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct Scenario {
+        initial: Vec<u8>,
+        ops: Vec<EditOp>,
+    }
+
+    impl Arbitrary for Scenario {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let op_count = usize::arbitrary(g) % 50;
+            Scenario {
+                initial: bytes_up_to(g, 255),
+                ops: (0..op_count).map(|_| EditOp::arbitrary(g)).collect(),
+            }
+        }
     }
 
     /// Apply an edit op to both a GapBuffer and a reference Vec<u8>.
@@ -1221,41 +1257,56 @@ mod proptests {
         }
     }
 
-    fn arb_text() -> impl Strategy<Value = Vec<u8>> {
-        prop::collection::vec(
-            prop::sample::select(vec![b'a', b'b', b'\n', b'\n', 0xc3, 0xa9]),
-            0..64,
-        )
+    fn text_from(g: &mut Gen, alphabet: &[u8], max_len: usize) -> Vec<u8> {
+        let len = usize::arbitrary(g) % (max_len + 1);
+        (0..len).map(|_| *g.choose(alphabet).unwrap()).collect()
+    }
+
+    fn arb_text(g: &mut Gen) -> Vec<u8> {
+        text_from(g, &[b'a', b'b', b'\n', b'\n', 0xc3, 0xa9], 63)
     }
 
     /// Sorted non-overlapping ranges over a buffer of `len` bytes, each with a replacement.
-    fn arb_replacements(len: usize) -> impl Strategy<Value = Vec<(usize, usize, Vec<u8>)>> {
-        (
-            prop::collection::vec(0..=len, 0..12),
-            prop::collection::vec(arb_text(), 6),
-        )
-            .prop_map(|(mut cuts, texts)| {
-                cuts.sort_unstable();
-                let starts = cuts.iter().step_by(2);
-                let ends = cuts.iter().skip(1).step_by(2);
-                starts
-                    .zip(ends)
-                    .zip(texts)
-                    .map(|((start, end), text)| (*start, *end, text))
-                    .collect()
-            })
+    #[derive(Debug, Clone)]
+    struct Replacements {
+        initial: Vec<u8>,
+        edits: Vec<(usize, usize, Vec<u8>)>,
     }
 
-    proptest! {
-        /// replace_sorted matches deleting then inserting each range from last to first,
-        /// including the line index, ASCII flag validity, dirty line, and version bump.
-        #[test]
-        fn replace_sorted_matches_sequential_edits(
-            (initial, edits) in arb_text().prop_flat_map(|text| {
-                let len = text.len();
-                (Just(text), arb_replacements(len))
-            }),
-        ) {
+    impl Arbitrary for Replacements {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let initial = arb_text(g);
+            let cut_count = usize::arbitrary(g) % 12;
+            let mut cuts: Vec<usize> = (0..cut_count)
+                .map(|_| usize::arbitrary(g) % (initial.len() + 1))
+                .collect();
+            cuts.sort_unstable();
+            let texts: Vec<Vec<u8>> = (0..6).map(|_| arb_text(g)).collect();
+            let starts = cuts.iter().step_by(2);
+            let ends = cuts.iter().skip(1).step_by(2);
+            let edits = starts
+                .zip(ends)
+                .zip(texts)
+                .map(|((start, end), text)| (*start, *end, text))
+                .collect();
+            Replacements { initial, edits }
+        }
+    }
+
+    fn apply_all(initial: &[u8], ops: &[EditOp]) -> (GapBuffer, Vec<u8>) {
+        let mut buf = GapBuffer::from_bytes(initial.to_vec());
+        let mut reference = initial.to_vec();
+        for op in ops {
+            apply_op(&mut buf, &mut reference, op);
+        }
+        (buf, reference)
+    }
+
+    /// replace_sorted matches deleting then inserting each range from last to first,
+    /// including the line index, ASCII flag validity, dirty line, and version bump.
+    #[test]
+    fn replace_sorted_matches_sequential_edits() {
+        fn property(Replacements { initial, edits }: Replacements) {
             let mut batched = GapBuffer::from_bytes(initial.clone());
             let mut sequential = GapBuffer::from_bytes(initial);
             let version = batched.version();
@@ -1270,123 +1321,142 @@ mod proptests {
             batched.replace_sorted(
                 edits.iter().map(|(start, end, text)| (*start, *end, text.as_slice())),
             );
-            prop_assert_eq!(batched.contents(), sequential.contents());
-            prop_assert_eq!(&batched.line_starts, &sequential.line_starts);
-            // Flags may be more precise than the sequential ones, but a set flag
-            // must always mean the line really is ASCII.
-            prop_assert_eq!(batched.line_starts.len(), batched.line_ascii.len());
+            assert_eq!(batched.contents(), sequential.contents());
+            assert_eq!(&batched.line_starts, &sequential.line_starts);
+            assert_eq!(batched.line_starts.len(), batched.line_ascii.len());
             for line in 0..batched.line_count() {
                 if batched.line_is_ascii(line) {
-                    prop_assert!(batched.line_text(line).is_ascii());
+                    assert!(batched.line_text(line).is_ascii());
                 }
             }
-            prop_assert_eq!(batched.take_dirty_line(), sequential.take_dirty_line());
+            assert_eq!(batched.take_dirty_line(), sequential.take_dirty_line());
             if edits.iter().any(|(start, end, text)| start != end || !text.is_empty()) {
-                prop_assert!(batched.version() > version);
+                assert!(batched.version() > version);
             }
         }
+        check(property as fn(Replacements));
+    }
 
-        /// After any sequence of edits, contents() matches the reference.
-        #[test]
-        fn contents_match_reference(
-            initial in prop::collection::vec(any::<u8>(), 0..256),
-            ops in prop::collection::vec(arb_edit_op(), 0..50),
-        ) {
-            let mut buf = GapBuffer::from_bytes(initial.clone());
-            let mut reference = initial;
-            for op in &ops {
-                apply_op(&mut buf, &mut reference, op);
-            }
-            prop_assert_eq!(buf.contents(), reference);
+    /// After any sequence of edits, contents() matches the reference.
+    #[test]
+    fn contents_match_reference() {
+        fn property(Scenario { initial, ops }: Scenario) {
+            let (buf, reference) = apply_all(&initial, &ops);
+            assert_eq!(buf.contents(), reference);
         }
+        check(property as fn(Scenario));
+    }
 
-        /// The line index correctly partitions the buffer: line ranges
-        /// are contiguous, cover the entire buffer, and slice() for each
-        /// line range reconstructs the original content.
-        #[test]
-        fn line_index_partitions_buffer(
-            initial in prop::collection::vec(any::<u8>(), 0..256),
-            ops in prop::collection::vec(arb_edit_op(), 0..50),
-        ) {
-            let mut buf = GapBuffer::from_bytes(initial.clone());
-            let mut reference = initial;
-            for op in &ops {
-                apply_op(&mut buf, &mut reference, op);
-            }
+    /// The line index correctly partitions the buffer: line ranges
+    /// are contiguous, cover the entire buffer, and slice() for each
+    /// line range reconstructs the original content.
+    #[test]
+    fn line_index_partitions_buffer() {
+        fn property(Scenario { initial, ops }: Scenario) {
+            let (buf, _) = apply_all(&initial, &ops);
             let contents = buf.contents();
             let lc = buf.line_count();
-            prop_assert!(lc >= 1, "always at least 1 line");
-            prop_assert_eq!(buf.line_start(0), 0, "first line starts at 0");
-            prop_assert_eq!(buf.line_end(lc - 1), contents.len(), "last line ends at len");
+            assert!(lc >= 1, "always at least 1 line");
+            assert_eq!(buf.line_start(0), 0, "first line starts at 0");
+            assert_eq!(buf.line_end(lc - 1), contents.len(), "last line ends at len");
 
-            // Lines are contiguous and reconstruct the full content.
             let mut reconstructed = Vec::new();
             for i in 0..lc {
                 if i + 1 < lc {
-                    prop_assert_eq!(buf.line_end(i), buf.line_start(i + 1),
-                        "gap between line {} end and line {} start", i, i + 1);
+                    assert_eq!(
+                        buf.line_end(i),
+                        buf.line_start(i + 1),
+                        "gap between line {} end and line {} start",
+                        i,
+                        i + 1
+                    );
                 }
                 reconstructed.extend_from_slice(&buf.slice(buf.line_start(i), buf.line_end(i)));
             }
-            prop_assert_eq!(reconstructed, contents);
+            assert_eq!(reconstructed, contents);
         }
+        check(property as fn(Scenario));
+    }
 
-        /// position_to_byte_offset and byte_offset_to_position are inverses for valid positions.
-        #[test]
-        fn pos_offset_roundtrip(
-            text in prop::collection::vec(any::<u8>(), 0..256),
-        ) {
+    /// position_to_byte_offset and byte_offset_to_position are inverses for valid positions.
+    #[test]
+    fn pos_offset_roundtrip() {
+        fn property(text: Vec<u8>) {
             let buf = GapBuffer::from_bytes(text);
             for line in 0..buf.line_count() {
                 let char_len = buf.line_character_count(line);
                 for column in 0..=char_len {
                     let offset = buf.position_to_byte_offset(line, column);
                     let (rt_line, rt_col) = buf.byte_offset_to_position(offset);
-                    prop_assert_eq!((rt_line, rt_col), (line, column),
+                    assert_eq!(
+                        (rt_line, rt_col),
+                        (line, column),
                         "roundtrip failed for ({}, {}): offset={}, got ({}, {})",
-                        line, column, offset, rt_line, rt_col);
+                        line,
+                        column,
+                        offset,
+                        rt_line,
+                        rt_col
+                    );
+                }
+            }
+        }
+        check(property as fn(Vec<u8>));
+    }
+
+    /// line_start(n+1) == line_end(n) for adjacent lines (lines end with '\n').
+    #[test]
+    fn line_boundaries_contiguous() {
+        fn property(text: Vec<u8>) {
+            let buf = GapBuffer::from_bytes(text);
+            let lc = buf.line_count();
+            for line in 0..lc.saturating_sub(1) {
+                assert_eq!(
+                    buf.line_start(line + 1),
+                    buf.line_end(line),
+                    "gap between line {} end and line {} start",
+                    line,
+                    line + 1
+                );
+            }
+        }
+        check(property as fn(Vec<u8>));
+    }
+
+    /// len() is always consistent with contents().len().
+    #[test]
+    fn len_matches_contents() {
+        fn property(Scenario { initial, ops }: Scenario) {
+            let (buf, reference) = apply_all(&initial, &ops);
+            assert_eq!(buf.len(), buf.contents().len());
+            assert_eq!(buf.len(), reference.len());
+        }
+        check(property as fn(Scenario));
+    }
+
+    /// Insert then delete at the same position restores original content.
+    #[test]
+    fn insert_delete_roundtrip() {
+        #[derive(Debug, Clone)]
+        struct Case {
+            initial: Vec<u8>,
+            insert_data: Vec<u8>,
+            pos_frac: f64,
+        }
+
+        impl Arbitrary for Case {
+            fn arbitrary(g: &mut Gen) -> Self {
+                let mut insert_data = bytes_up_to(g, 30);
+                insert_data.push(u8::arbitrary(g));
+                Case {
+                    initial: bytes_up_to(g, 127),
+                    insert_data,
+                    pos_frac: unit_fraction(g),
                 }
             }
         }
 
-        /// line_start(n+1) == line_end(n) for adjacent lines (lines end with '\n').
-        #[test]
-        fn line_boundaries_contiguous(
-            text in prop::collection::vec(any::<u8>(), 1..256),
-        ) {
-            let buf = GapBuffer::from_bytes(text);
-            let lc = buf.line_count();
-            for line in 0..lc.saturating_sub(1) {
-                prop_assert_eq!(
-                    buf.line_start(line + 1),
-                    buf.line_end(line),
-                    "gap between line {} end and line {} start", line, line + 1
-                );
-            }
-        }
-
-        /// len() is always consistent with contents().len().
-        #[test]
-        fn len_matches_contents(
-            initial in prop::collection::vec(any::<u8>(), 0..256),
-            ops in prop::collection::vec(arb_edit_op(), 0..50),
-        ) {
-            let mut buf = GapBuffer::from_bytes(initial.clone());
-            let mut reference = initial;
-            for op in &ops {
-                apply_op(&mut buf, &mut reference, op);
-            }
-            prop_assert_eq!(buf.len(), buf.contents().len());
-            prop_assert_eq!(buf.len(), reference.len());
-        }
-
-        /// Insert then delete at the same position restores original content.
-        #[test]
-        fn insert_delete_roundtrip(
-            initial in prop::collection::vec(any::<u8>(), 0..128),
-            insert_data in prop::collection::vec(any::<u8>(), 1..32),
-            pos_frac in 0.0f64..1.0,
-        ) {
+        fn property(Case { initial, insert_data, pos_frac }: Case) {
             let mut buf = GapBuffer::from_bytes(initial.clone());
             let pos = if initial.is_empty() {
                 0
@@ -1395,25 +1465,42 @@ mod proptests {
             };
             buf.insert(pos, &insert_data);
             buf.delete(pos, insert_data.len());
-            prop_assert_eq!(buf.contents(), initial);
+            assert_eq!(buf.contents(), initial);
+        }
+        check(property as fn(Case));
+    }
+
+    /// display_column_at round-trips through character_column_from_display for ASCII.
+    #[test]
+    fn display_col_roundtrip_ascii() {
+        #[derive(Debug, Clone)]
+        struct TwoLines(Vec<u8>);
+
+        impl Arbitrary for TwoLines {
+            fn arbitrary(g: &mut Gen) -> Self {
+                let alphabet: Vec<u8> = (b'a'..=b'z').chain(*b"\t ").collect();
+                let mut text = text_from(g, &alphabet, 80);
+                text.push(b'\n');
+                text.extend(text_from(g, &alphabet, 80));
+                TwoLines(text)
+            }
         }
 
-        /// display_column_at round-trips through character_column_from_display for ASCII.
-        #[test]
-        fn display_col_roundtrip_ascii(
-            text in "[a-z\t ]{0,80}\n[a-z\t ]{0,80}",
-        ) {
-            let buf = GapBuffer::from_bytes(text.into_bytes());
+        fn property(TwoLines(text): TwoLines) {
+            let buf = GapBuffer::from_bytes(text);
             for line in 0..buf.line_count() {
                 let char_len = buf.line_character_count(line);
                 for column in 0..=char_len {
                     let dcol = buf.display_column_at(line, column);
                     let rt_col = buf.character_column_from_display(line, dcol);
-                    prop_assert_eq!(rt_col, column,
+                    assert_eq!(
+                        rt_col, column,
                         "display roundtrip failed on line {} column {}: dcol={} rt={}",
-                        line, column, dcol, rt_col);
+                        line, column, dcol, rt_col
+                    );
                 }
             }
         }
+        check(property as fn(TwoLines));
     }
 }

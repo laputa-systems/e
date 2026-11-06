@@ -527,9 +527,23 @@ mod tests {
 }
 
 #[cfg(test)]
-mod proptests {
+mod properties {
     use super::*;
-    use proptest::prelude::*;
+    use quickcheck::{Arbitrary, Gen, QuickCheck};
+
+    fn check<T: quickcheck::Testable>(property: T) {
+        QuickCheck::new().tests(256).quickcheck(property);
+    }
+
+    fn nonempty_bytes_up_to(g: &mut Gen, max_len: usize) -> Vec<u8> {
+        let len = 1 + usize::arbitrary(g) % max_len;
+        (0..len).map(|_| u8::arbitrary(g)).collect()
+    }
+
+    fn bytes_up_to(g: &mut Gen, max_len: usize) -> Vec<u8> {
+        let len = usize::arbitrary(g) % (max_len + 1);
+        (0..len).map(|_| u8::arbitrary(g)).collect()
+    }
 
     #[derive(Debug, Clone)]
     enum DocOp {
@@ -549,18 +563,25 @@ mod proptests {
         Seal,
     }
 
-    fn arb_doc_op() -> impl Strategy<Value = DocOp> {
-        prop_oneof![
-            3 => (any::<f64>(), any::<f64>(), prop::collection::vec(any::<u8>(), 1..32))
-                .prop_map(|(l, c, d)| DocOp::Insert { line_frac: l, col_frac: c, data: d }),
-            2 => (any::<f64>(), any::<f64>(), any::<f64>(), any::<f64>())
-                .prop_map(|(l1, c1, l2, c2)| DocOp::Delete {
-                    l1_frac: l1, c1_frac: c1, l2_frac: l2, c2_frac: c2
-                }),
-            2 => Just(DocOp::Undo),
-            1 => Just(DocOp::Redo),
-            1 => Just(DocOp::Seal),
-        ]
+    impl Arbitrary for DocOp {
+        fn arbitrary(g: &mut Gen) -> Self {
+            match usize::arbitrary(g) % 9 {
+                0..=2 => DocOp::Insert {
+                    line_frac: f64::arbitrary(g),
+                    col_frac: f64::arbitrary(g),
+                    data: nonempty_bytes_up_to(g, 31),
+                },
+                3..=4 => DocOp::Delete {
+                    l1_frac: f64::arbitrary(g),
+                    c1_frac: f64::arbitrary(g),
+                    l2_frac: f64::arbitrary(g),
+                    c2_frac: f64::arbitrary(g),
+                },
+                5..=6 => DocOp::Undo,
+                7 => DocOp::Redo,
+                _ => DocOp::Seal,
+            }
+        }
     }
 
     fn clamp_pos(doc: &Document, line_frac: f64, col_frac: f64) -> TextPosition {
@@ -575,13 +596,50 @@ mod proptests {
         TextPosition::new(line, column)
     }
 
-    proptest! {
-        /// After any sequence of edits/undos/redos, buffer invariants hold.
-        #[test]
-        fn document_edit_undo_redo_consistency(
-            initial in prop::collection::vec(any::<u8>(), 0..128),
-            ops in prop::collection::vec(arb_doc_op(), 0..40),
-        ) {
+    #[derive(Debug, Clone)]
+    struct EditHistory {
+        initial: Vec<u8>,
+        ops: Vec<DocOp>,
+    }
+
+    impl Arbitrary for EditHistory {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let op_count = usize::arbitrary(g) % 40;
+            EditHistory {
+                initial: bytes_up_to(g, 127),
+                ops: (0..op_count).map(|_| DocOp::arbitrary(g)).collect(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct InsertHistory {
+        initial: Vec<u8>,
+        inserts: Vec<(f64, f64, Vec<u8>)>,
+    }
+
+    impl Arbitrary for InsertHistory {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let insert_count = 1 + usize::arbitrary(g) % 9;
+            InsertHistory {
+                initial: bytes_up_to(g, 127),
+                inserts: (0..insert_count)
+                    .map(|_| {
+                        (
+                            f64::arbitrary(g),
+                            f64::arbitrary(g),
+                            nonempty_bytes_up_to(g, 15),
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    /// After any sequence of edits/undos/redos, buffer invariants hold.
+    #[test]
+    fn document_edit_undo_redo_consistency() {
+        fn property(EditHistory { initial, ops }: EditHistory) {
             let mut doc = Document::new(initial, None);
 
             for op in &ops {
@@ -597,30 +655,32 @@ mod proptests {
                             doc.delete_range(start, end);
                         }
                     }
-                    DocOp::Undo => { doc.undo(); }
-                    DocOp::Redo => { doc.redo(); }
-                    DocOp::Seal => { doc.seal_undo(); }
+                    DocOp::Undo => {
+                        doc.undo();
+                    }
+                    DocOp::Redo => {
+                        doc.redo();
+                    }
+                    DocOp::Seal => {
+                        doc.seal_undo();
+                    }
                 }
 
-                // Buffer must be internally consistent after every operation.
                 let lc = doc.buffer.line_count();
-                prop_assert!(lc >= 1);
-                prop_assert_eq!(doc.buffer.line_start(0), 0);
-                prop_assert_eq!(doc.buffer.line_end(lc - 1), doc.buffer.len());
-                prop_assert_eq!(doc.buffer.len(), doc.buffer.contents().len());
+                assert!(lc >= 1);
+                assert_eq!(doc.buffer.line_start(0), 0);
+                assert_eq!(doc.buffer.line_end(lc - 1), doc.buffer.len());
+                assert_eq!(doc.buffer.len(), doc.buffer.contents().len());
             }
         }
+        check(property as fn(EditHistory));
+    }
 
-        /// Full undo restores original content.
-        #[test]
-        fn full_undo_restores_original(
-            initial in prop::collection::vec(any::<u8>(), 0..128),
-            inserts in prop::collection::vec(
-                (any::<f64>(), any::<f64>(), prop::collection::vec(any::<u8>(), 1..16)),
-                1..10,
-            ),
-        ) {
-            let mut doc = Document::new(initial.clone(), None);
+    /// Full undo restores original content.
+    #[test]
+    fn full_undo_restores_original() {
+        fn property(InsertHistory { initial, inserts }: InsertHistory) {
+            let mut doc = Document::new(initial, None);
             let original = doc.buffer.contents();
 
             for (l, c, data) in &inserts {
@@ -630,15 +690,15 @@ mod proptests {
             }
             doc.seal_undo();
 
-            // Undo everything
             let mut undo_count = 0;
             while doc.undo().is_some() {
                 undo_count += 1;
-                prop_assert!(undo_count <= inserts.len() + 1, "infinite undo loop");
+                assert!(undo_count <= inserts.len() + 1, "infinite undo loop");
             }
 
-            prop_assert_eq!(doc.buffer.contents(), original);
+            assert_eq!(doc.buffer.contents(), original);
         }
+        check(property as fn(InsertHistory));
     }
 
     #[test]

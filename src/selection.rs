@@ -575,66 +575,65 @@ mod tests {
 }
 
 #[cfg(test)]
-mod proptests {
+mod properties {
     use super::*;
-    use proptest::prelude::*;
+    use quickcheck::QuickCheck;
 
-    proptest! {
-        /// prev_word_boundary always returns <= column and within bounds.
-        #[test]
-        fn prev_word_boundary_in_bounds(
-            line in prop::collection::vec(any::<u8>(), 0..128),
-            column in 0usize..256,
-        ) {
-            let result = prev_word_boundary(&line, column);
-            prop_assert!(result <= column);
-            prop_assert!(result <= line.len());
+    fn check<T: quickcheck::Testable>(property: T) {
+        QuickCheck::new().tests(256).quickcheck(property);
+    }
+
+    #[test]
+    fn prev_word_boundary_in_bounds() {
+        fn property(line: Vec<u8>, column: usize) {
+            let line = &line[..line.len().min(128)];
+            let column = column % 256;
+            let result = prev_word_boundary(line, column);
+            assert!(result <= column);
+            assert!(result <= line.len());
         }
+        check(property as fn(Vec<u8>, usize));
+    }
 
-        /// next_word_boundary always returns >= column and within bounds.
-        #[test]
-        fn next_word_boundary_in_bounds(
-            line in prop::collection::vec(any::<u8>(), 0..128),
-            column in 0usize..256,
-        ) {
-            let result = next_word_boundary(&line, column.min(line.len()));
-            prop_assert!(result >= column.min(line.len()));
-            prop_assert!(result <= line.len());
+    #[test]
+    fn next_word_boundary_in_bounds() {
+        fn property(line: Vec<u8>, column: usize) {
+            let line = &line[..line.len().min(128)];
+            let column = (column % 256).min(line.len());
+            let result = next_word_boundary(line, column);
+            assert!(result >= column);
+            assert!(result <= line.len());
         }
+        check(property as fn(Vec<u8>, usize));
+    }
 
-        /// Selection::ordered always returns (start <= end).
-        #[test]
-        fn selection_ordered_invariant(
-            al in 0usize..1000, ac in 0usize..1000,
-            cl in 0usize..1000, cc in 0usize..1000,
-        ) {
+    #[test]
+    fn selection_ordered_invariant() {
+        fn property(al: usize, ac: usize, cl: usize, cc: usize) {
             let selection = Selection {
-                anchor: TextPosition::new(al, ac),
-                cursor: TextPosition::new(cl, cc),
+                anchor: TextPosition::new(al % 1000, ac % 1000),
+                cursor: TextPosition::new(cl % 1000, cc % 1000),
             };
             let (start, end) = selection.ordered();
-            prop_assert!(start <= end);
-            // One of them should be anchor, the other cursor
-            prop_assert!(
+            assert!(start <= end);
+            assert!(
                 (start == selection.anchor && end == selection.cursor)
-                || (start == selection.cursor && end == selection.anchor)
+                    || (start == selection.cursor && end == selection.anchor)
             );
         }
+        check(property as fn(usize, usize, usize, usize));
+    }
 
-        /// TextPosition ordering is a total order (transitivity, antisymmetry).
-        #[test]
-        fn pos_ordering_total(
-            l1 in 0usize..100, c1 in 0usize..100,
-            l2 in 0usize..100, c2 in 0usize..100,
-        ) {
-            let a = TextPosition::new(l1, c1);
-            let b = TextPosition::new(l2, c2);
-            // Antisymmetry: if a <= b and b <= a then a == b
+    #[test]
+    fn pos_ordering_total() {
+        fn property(l1: usize, c1: usize, l2: usize, c2: usize) {
+            let a = TextPosition::new(l1 % 100, c1 % 100);
+            let b = TextPosition::new(l2 % 100, c2 % 100);
             if a <= b && b <= a {
-                prop_assert_eq!(a, b);
+                assert_eq!(a, b);
             }
-            // Totality: either a <= b or b <= a
-            prop_assert!(a <= b || b <= a);
+            assert!(a <= b || b <= a);
         }
+        check(property as fn(usize, usize, usize, usize));
     }
 }

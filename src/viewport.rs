@@ -600,56 +600,50 @@ mod tests {
 }
 
 #[cfg(test)]
-mod proptests {
+mod properties {
     use super::*;
-    use proptest::prelude::*;
+    use quickcheck::QuickCheck;
 
-    proptest! {
-        /// wrapped_rows never returns 0 and never panics.
-        #[test]
-        fn wrapped_rows_always_at_least_one(
-            display_width in 0usize..10_000,
-            text_cols in 0usize..10_000,
-        ) {
-            let rows = wrapped_rows(display_width, text_cols);
-            prop_assert!(rows >= 1);
+    fn check<T: quickcheck::Testable>(property: T) {
+        QuickCheck::new().tests(256).quickcheck(property);
+    }
+
+    #[test]
+    fn wrapped_rows_always_at_least_one() {
+        fn property(display_width: usize, text_cols: usize) {
+            let rows = wrapped_rows(display_width % 10_000, text_cols % 10_000);
+            assert!(rows >= 1);
         }
+        check(property as fn(usize, usize));
+    }
 
-        /// ensure_cursor_visible never panics on arbitrary inputs.
-        #[test]
-        fn ensure_cursor_visible_no_panic(
-            width in 1u16..500,
-            height in 1u16..200,
-            cursor_line in 0usize..5000,
-            cursor_col in 0usize..5000,
-            gutter in 0usize..20,
-            scroll_line in 0usize..5000,
-            scroll_wrap in 0usize..50,
+    #[test]
+    fn ensure_cursor_visible_no_panic() {
+        fn property(
+            width: u16,
+            height: u16,
+            cursor_line: usize,
+            cursor_col: usize,
+            gutter: usize,
+            scroll_line: usize,
+            scroll_wrap: usize,
         ) {
-            let mut v = Viewport::new(width, height);
-            v.scroll_line = scroll_line;
-            v.scroll_wrap = scroll_wrap;
-
-            // Use a constant-width line function to avoid unbounded callbacks.
+            let mut v = Viewport::new(1 + width % 499, 1 + height % 199);
+            v.scroll_line = scroll_line % 5000;
+            v.scroll_wrap = scroll_wrap % 50;
             let mut widths = |_line: usize| -> usize { 40 };
-            v.ensure_cursor_visible(cursor_line, cursor_col, gutter, &mut widths);
-
-            // After call, scroll state must be sane.
-            // If text_rows > 0, the cursor should now be reachable.
-            // At minimum, no panic occurred.
+            v.ensure_cursor_visible(cursor_line % 5000, cursor_col % 5000, gutter % 20, &mut widths);
         }
+        check(property as fn(u16, u16, usize, usize, usize, usize, usize));
+    }
 
-        /// center_on_line never panics on arbitrary inputs.
-        #[test]
-        fn center_on_line_no_panic(
-            width in 1u16..500,
-            height in 1u16..200,
-            line in 0usize..5000,
-            gutter in 0usize..20,
-        ) {
-            let mut v = Viewport::new(width, height);
+    #[test]
+    fn center_on_line_no_panic() {
+        fn property(width: u16, height: u16, line: usize, gutter: usize) {
+            let mut v = Viewport::new(1 + width % 499, 1 + height % 199);
             let mut widths = |_line: usize| -> usize { 40 };
-            v.center_on_line(line, &mut widths, gutter);
+            v.center_on_line(line % 5000, &mut widths, gutter % 20);
         }
+        check(property as fn(u16, u16, usize, usize));
     }
 }
