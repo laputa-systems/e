@@ -110,13 +110,15 @@ impl Editor {
     }
 
     pub(super) fn targeted_lines_for_carets(&self) -> Vec<usize> {
-        let mut lines = std::collections::BTreeSet::new();
+        let mut lines = rustc_hash::FxHashSet::default();
         for caret in self.carets.iter() {
             let (start_line, end_line) = Self::line_range_for_selection(caret.selection);
             for line in start_line..=end_line {
                 lines.insert(line);
             }
         }
-        lines.into_iter().collect()
+        let mut lines: Vec<usize> = lines.into_iter().collect();
+        lines.sort_unstable();
+        lines
     }
 }
