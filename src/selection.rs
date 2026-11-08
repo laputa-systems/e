@@ -283,23 +283,49 @@ impl CaretSet {
 // -- word boundary helpers --------------------------------------------------
 
 /// Is the character a word character (alphanumeric or underscore)?
-pub fn is_word_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_'
+pub fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+pub fn decode_line_chars(line_bytes: &[u8]) -> Vec<char> {
+    if line_bytes.is_ascii() {
+        return line_bytes.iter().map(|&b| b as char).collect();
+    }
+    let mut chars = Vec::with_capacity(crate::buffer::character_count(line_bytes));
+    let mut i = 0;
+    while i < line_bytes.len() {
+        let b = line_bytes[i];
+        let len = crate::buffer::utf8_char_len(b).min(line_bytes.len() - i);
+        if let Ok(s) = std::str::from_utf8(&line_bytes[i..i + len])
+            && let Some(c) = s.chars().next()
+        {
+            chars.push(c);
+        } else {
+            chars.push(b as char);
+        }
+        i += len;
+    }
+    chars
 }
 
 /// Find the start of the previous word from `column` in `line_bytes`.
 pub fn prev_word_boundary(line_bytes: &[u8], column: usize) -> usize {
-    if column == 0 {
-        return 0;
+    if line_bytes.is_ascii() {
+        let mut i = column.min(line_bytes.len());
+        while i > 0 && !is_word_char(line_bytes[i - 1] as char) {
+            i -= 1;
+        }
+        while i > 0 && is_word_char(line_bytes[i - 1] as char) {
+            i -= 1;
+        }
+        return i;
     }
-    let mut i = column.min(line_bytes.len());
-
-    // Skip whitespace/non-word chars backward
-    while i > 0 && !is_word_char(line_bytes[i - 1]) {
+    let chars = decode_line_chars(line_bytes);
+    let mut i = column.min(chars.len());
+    while i > 0 && !is_word_char(chars[i - 1]) {
         i -= 1;
     }
-    // Skip word chars backward
-    while i > 0 && is_word_char(line_bytes[i - 1]) {
+    while i > 0 && is_word_char(chars[i - 1]) {
         i -= 1;
     }
     i
@@ -307,15 +333,24 @@ pub fn prev_word_boundary(line_bytes: &[u8], column: usize) -> usize {
 
 /// Find the end of the next word from `column` in `line_bytes`.
 pub fn next_word_boundary(line_bytes: &[u8], column: usize) -> usize {
-    let len = line_bytes.len();
-    let mut i = column;
-
-    // Skip word chars forward
-    while i < len && is_word_char(line_bytes[i]) {
+    if line_bytes.is_ascii() {
+        let len = line_bytes.len();
+        let mut i = column.min(len);
+        while i < len && is_word_char(line_bytes[i] as char) {
+            i += 1;
+        }
+        while i < len && !is_word_char(line_bytes[i] as char) {
+            i += 1;
+        }
+        return i;
+    }
+    let chars = decode_line_chars(line_bytes);
+    let len = chars.len();
+    let mut i = column.min(len);
+    while i < len && is_word_char(chars[i]) {
         i += 1;
     }
-    // Skip whitespace/non-word chars forward
-    while i < len && !is_word_char(line_bytes[i]) {
+    while i < len && !is_word_char(chars[i]) {
         i += 1;
     }
     i
@@ -475,15 +510,19 @@ mod tests {
 
     #[test]
     fn test_is_word_char() {
-        assert!(is_word_char(b'a'));
-        assert!(is_word_char(b'Z'));
-        assert!(is_word_char(b'0'));
-        assert!(is_word_char(b'_'));
-        assert!(!is_word_char(b' '));
-        assert!(!is_word_char(b'.'));
-        assert!(!is_word_char(b'-'));
-        assert!(!is_word_char(b'('));
-        assert!(!is_word_char(b'\n'));
+        assert!(is_word_char('a'));
+        assert!(is_word_char('Z'));
+        assert!(is_word_char('0'));
+        assert!(is_word_char('_'));
+        assert!(is_word_char('é'));
+        assert!(is_word_char('ñ'));
+        assert!(is_word_char('я'));
+        assert!(!is_word_char(' '));
+        assert!(!is_word_char('.'));
+        assert!(!is_word_char('-'));
+        assert!(!is_word_char('('));
+        assert!(!is_word_char('\n'));
+        assert!(!is_word_char('🦀'));
     }
 
     // -- prev_word_boundary -------------------------------------------------
@@ -587,10 +626,11 @@ mod properties {
     fn prev_word_boundary_in_bounds() {
         fn property(line: Vec<u8>, column: usize) {
             let line = &line[..line.len().min(128)];
+            let char_len = crate::buffer::character_count(line);
             let column = column % 256;
             let result = prev_word_boundary(line, column);
             assert!(result <= column);
-            assert!(result <= line.len());
+            assert!(result <= char_len);
         }
         check(property as fn(Vec<u8>, usize));
     }
@@ -599,10 +639,11 @@ mod properties {
     fn next_word_boundary_in_bounds() {
         fn property(line: Vec<u8>, column: usize) {
             let line = &line[..line.len().min(128)];
-            let column = (column % 256).min(line.len());
+            let char_len = crate::buffer::character_count(line);
+            let column = (column % 256).min(char_len);
             let result = next_word_boundary(line, column);
             assert!(result >= column);
-            assert!(result <= line.len());
+            assert!(result <= char_len);
         }
         check(property as fn(Vec<u8>, usize));
     }

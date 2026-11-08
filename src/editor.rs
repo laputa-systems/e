@@ -1268,20 +1268,39 @@ impl Editor {
         if line_text.is_empty() {
             return;
         }
-        let column = pos.column.min(line_text.len().saturating_sub(1));
-        if column < line_text.len() && is_word_char(line_text[column]) {
-            let mut start = column;
-            while start > 0 && is_word_char(line_text[start - 1]) {
-                start -= 1;
+        if line_text.is_ascii() {
+            let column = pos.column.min(line_text.len().saturating_sub(1));
+            if column < line_text.len() && is_word_char(line_text[column] as char) {
+                let mut start = column;
+                while start > 0 && is_word_char(line_text[start - 1] as char) {
+                    start -= 1;
+                }
+                let mut end = column;
+                while end < line_text.len() && is_word_char(line_text[end] as char) {
+                    end += 1;
+                }
+                self.set_selection(Selection {
+                    anchor: TextPosition::new(pos.line, end),
+                    cursor: TextPosition::new(pos.line, start),
+                });
             }
-            let mut end = column;
-            while end < line_text.len() && is_word_char(line_text[end]) {
-                end += 1;
+        } else {
+            let chars = crate::selection::decode_line_chars(line_text);
+            let column = pos.column.min(chars.len().saturating_sub(1));
+            if column < chars.len() && is_word_char(chars[column]) {
+                let mut start = column;
+                while start > 0 && is_word_char(chars[start - 1]) {
+                    start -= 1;
+                }
+                let mut end = column;
+                while end < chars.len() && is_word_char(chars[end]) {
+                    end += 1;
+                }
+                self.set_selection(Selection {
+                    anchor: TextPosition::new(pos.line, end),
+                    cursor: TextPosition::new(pos.line, start),
+                });
             }
-            self.set_selection(Selection {
-                anchor: TextPosition::new(pos.line, end),
-                cursor: TextPosition::new(pos.line, start),
-            });
         }
     }
 

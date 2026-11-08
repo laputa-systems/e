@@ -3041,6 +3041,61 @@ fn test_autoclose_skip_closing_paren() {
 }
 
 #[test]
+fn test_utf8_autoclose_skip_and_insert() {
+    let mut e = ed("é)");
+    e.set_cursor(TextPosition::new(0, 2));
+    e.insert_char(')');
+    assert_eq!(e.test_text(), "é))");
+    assert_eq!(e.cursor(), TextPosition::new(0, 3));
+
+    let mut e2 = ed("é()");
+    e2.set_cursor(TextPosition::new(0, 2));
+    e2.insert_char(')');
+    assert_eq!(e2.test_text(), "é()");
+    assert_eq!(e2.cursor(), TextPosition::new(0, 3));
+
+    let mut e3 = ed("🦀()");
+    e3.set_cursor(TextPosition::new(0, 2));
+    e3.backspace();
+    assert_eq!(e3.test_text(), "🦀");
+    assert_eq!(e3.cursor(), TextPosition::new(0, 1));
+
+    let mut e4 = ed("🦀()");
+    e4.set_cursor(TextPosition::new(0, 2));
+    e4.insert_newline();
+    assert_eq!(e4.test_text(), "🦀(\n  \n)");
+}
+
+#[test]
+fn test_utf8_word_navigation_and_selection() {
+    let mut e = ed("🦀 hello world");
+    e.set_cursor(TextPosition::new(0, 13));
+    e.word_left();
+    assert_eq!(e.cursor(), TextPosition::new(0, 8));
+    e.word_left();
+    assert_eq!(e.cursor(), TextPosition::new(0, 2));
+    e.word_left();
+    assert_eq!(e.cursor(), TextPosition::new(0, 0));
+    e.word_right();
+    assert_eq!(e.cursor(), TextPosition::new(0, 2));
+    e.word_right();
+    assert_eq!(e.cursor(), TextPosition::new(0, 8));
+
+    e.set_cursor(TextPosition::new(0, 4));
+    e.select_word_at(TextPosition::new(0, 4));
+    assert_eq!(
+        e.selection().ordered(),
+        (TextPosition::new(0, 2), TextPosition::new(0, 7))
+    );
+
+    let mut e2 = ed("🦀 hello world");
+    e2.set_cursor(TextPosition::new(0, 13));
+    e2.ctrl_backspace();
+    assert_eq!(e2.test_text(), "🦀 hello ");
+    assert_eq!(e2.cursor(), TextPosition::new(0, 8));
+}
+
+#[test]
 fn test_autoclose_skip_closing_bracket() {
     let mut e = ed("");
     e.insert_char('[');

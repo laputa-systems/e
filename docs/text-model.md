@@ -18,6 +18,6 @@ An `UndoOperation` inserts or deletes retained bytes at a byte offset. Undo and 
 
 ## Selections and carets
 
-`Selection` has a fixed `anchor` and a moving `cursor`; `ordered()` returns its start and end. `CaretSet` contains one or more carets and a `primary` index that controls viewport focus and status behavior. Its constructors reject empty sets and invalid primary indices.
+`Selection` has a fixed `anchor` and a moving `cursor`; `ordered()` returns its start and end. Character columns (`TextPosition::column`) index Unicode characters rather than byte offsets. Word navigation (`prev_word_boundary`, `next_word_boundary`), word selection, and line-level editing operate on character boundaries, classifying Unicode alphanumeric characters and underscores as word characters. `CaretSet` contains one or more carets and a `primary` index that controls viewport focus and status behavior. Its constructors reject empty sets and invalid primary indices.
 
 Each `Caret` has a sticky `desired_column` for vertical and page movement. Other movement resets it.

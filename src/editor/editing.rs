@@ -55,11 +55,8 @@ impl Editor {
                 let offset = self.offset_for_pos(pos);
 
                 if is_close_char(c) {
-                    let ls = self.document.buffer.line_start(pos.line);
                     let le = self.document.buffer.line_end(pos.line);
-                    if ls + pos.column < le
-                        && self.document.buffer.byte_at(ls + pos.column) == c as u8
-                    {
+                    if offset < le && self.document.buffer.byte_at(offset) == c as u8 {
                         planned.push(PlannedCaretEdit {
                             start_byte: offset,
                             end_byte: offset,
@@ -73,10 +70,9 @@ impl Editor {
                 }
 
                 if let Some(close) = auto_close_char(c, lang_name) {
-                    let ls = self.document.buffer.line_start(pos.line);
                     let le = self.document.buffer.line_end(pos.line);
-                    let next = if ls + pos.column < le {
-                        self.document.buffer.byte_at(ls + pos.column)
+                    let next = if offset < le {
+                        self.document.buffer.byte_at(offset)
                     } else {
                         b'\n'
                     };
@@ -136,15 +132,12 @@ impl Editor {
             self.delete_selection();
         }
 
-        // Skip over closing char if it's already the next character.
-        // close chars are ASCII so byte_at(line_start + column) == the char at column.
         if is_close_char(c) {
-            let line = self.cursor().line;
-            let column = self.cursor().column;
-            let ls = self.document.buffer.line_start(line);
-            let le = self.document.buffer.line_end(line);
-            if ls + column < le && self.document.buffer.byte_at(ls + column) == c as u8 {
-                self.set_cursor(TextPosition::new(line, column + 1));
+            let cursor = self.cursor();
+            let offset = self.offset_for_pos(cursor);
+            let le = self.document.buffer.line_end(cursor.line);
+            if offset < le && self.document.buffer.byte_at(offset) == c as u8 {
+                self.set_cursor(TextPosition::new(cursor.line, cursor.column + 1));
                 return;
             }
         }
@@ -154,13 +147,13 @@ impl Editor {
 
         // Auto-close pairs: insert open+close on a stack buffer, no heap alloc.
         if let Some(close) = auto_close_char(c, lang_name) {
-            let line = self.cursor().line;
-            let column = self.cursor().column;
-            let ls = self.document.buffer.line_start(line);
-            let le = self.document.buffer.line_end(line);
+            let cursor = self.cursor();
+            let offset = self.offset_for_pos(cursor);
+            let ls = self.document.buffer.line_start(cursor.line);
+            let le = self.document.buffer.line_end(cursor.line);
             // Treat end-of-line (\n or past end) as a boundary.
-            let next = if ls + column < le {
-                self.document.buffer.byte_at(ls + column)
+            let next = if offset < le {
+                self.document.buffer.byte_at(offset)
             } else {
                 b'\n'
             };
@@ -177,14 +170,14 @@ impl Editor {
                     // ((, [, {) are excluded because a run of identical open
                     // chars is never a meaningful delimiter.
                     let mut n = 0;
-                    while column > n
-                        && self.document.buffer.byte_at(ls + column - 1 - n) == c as u8
+                    while offset > ls + n
+                        && self.document.buffer.byte_at(offset - 1 - n) == c as u8
                     {
                         n += 1;
                     }
                     if n >= 2 {
                         let fence = [c as u8; 4];
-                        let pos = self.document.insert(line, column, &fence);
+                        let pos = self.document.insert(cursor.line, cursor.column, &fence);
                         // Caret sits after the third opening character.
                         self.set_cursor(TextPosition::new(pos.line, pos.column - 3));
                         return;
@@ -195,7 +188,7 @@ impl Editor {
                 let mut pair = [0u8; 5];
                 pair[..cb.len()].copy_from_slice(cb);
                 pair[cb.len()] = close as u8;
-                let pos = self.document.insert(line, column, &pair[..cb.len() + 1]);
+                let pos = self.document.insert(cursor.line, cursor.column, &pair[..cb.len() + 1]);
                 // Place cursor between the pair
                 self.set_cursor(TextPosition::new(pos.line, pos.column - 1));
                 return;
@@ -353,9 +346,14 @@ impl Editor {
                     .collect();
 
                 if selection.is_empty() && base.column > 0 {
+                    let offset = start_offset;
                     let ls = self.document.buffer.line_start(base.line);
                     let le = self.document.buffer.line_end(base.line);
-                    let prev = self.document.buffer.byte_at(ls + base.column - 1);
+                    let prev = if offset > ls {
+                        self.document.buffer.byte_at(offset - 1)
+                    } else {
+                        0
+                    };
                     let close_opt = match prev {
                         b'(' => Some(b')'),
                         b'[' => Some(b']'),
@@ -363,8 +361,8 @@ impl Editor {
                         _ => None,
                     };
                     if let Some(close) = close_opt
-                        && ls + base.column < le
-                        && self.document.buffer.byte_at(ls + base.column) == close
+                        && offset < le
+                        && self.document.buffer.byte_at(offset) == close
                     {
                         let extra: &[u8] = if self.use_tab_indent() { b"\t" } else { b"  " };
                         let mut insert = vec![b'\n'];
@@ -417,9 +415,14 @@ impl Editor {
 
         // Between bracket pairs ({|}, (|), [|]): split with extra indent level.
         if c.column > 0 {
+            let offset = self.offset_for_pos(c);
             let ls = self.document.buffer.line_start(c.line);
             let le = self.document.buffer.line_end(c.line);
-            let prev = self.document.buffer.byte_at(ls + c.column - 1);
+            let prev = if offset > ls {
+                self.document.buffer.byte_at(offset - 1)
+            } else {
+                0
+            };
             let close_opt = match prev {
                 b'(' => Some(b')'),
                 b'[' => Some(b']'),
@@ -427,8 +430,8 @@ impl Editor {
                 _ => None,
             };
             if let Some(close) = close_opt
-                && ls + c.column < le
-                && self.document.buffer.byte_at(ls + c.column) == close
+                && offset < le
+                && self.document.buffer.byte_at(offset) == close
             {
                 let extra: &[u8] = if self.use_tab_indent() { b"\t" } else { b"  " };
                 let mut split = vec![b'\n'];
@@ -508,9 +511,14 @@ impl Editor {
                         }
                     }
 
-                    let prev = self.document.buffer.byte_at(ls + c.column - 1);
-                    if ls + c.column < le {
-                        let next = self.document.buffer.byte_at(ls + c.column);
+                    let offset = self.offset_for_pos(c);
+                    let prev = if offset > ls {
+                        self.document.buffer.byte_at(offset - 1)
+                    } else {
+                        0
+                    };
+                    if offset < le {
+                        let next = self.document.buffer.byte_at(offset);
                         let lang_name = self.document.detect_language().map(|l| l.name());
                         if auto_close_char(prev as char, lang_name) == Some(next as char) {
                             let start = TextPosition::new(c.line, c.column - 1);
@@ -602,9 +610,14 @@ impl Editor {
             }
 
             // Delete matching auto-close pair if cursor is between them.
-            let prev = self.document.buffer.byte_at(ls + c.column - 1);
-            if ls + c.column < le {
-                let next = self.document.buffer.byte_at(ls + c.column);
+            let offset = self.offset_for_pos(c);
+            let prev = if offset > ls {
+                self.document.buffer.byte_at(offset - 1)
+            } else {
+                0
+            };
+            if offset < le {
+                let next = self.document.buffer.byte_at(offset);
                 let lang_name = self.document.detect_language().map(|l| l.name());
                 if auto_close_char(prev as char, lang_name) == Some(next as char) {
                     let start = TextPosition::new(c.line, c.column - 1);

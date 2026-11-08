@@ -1,19 +1,6 @@
 Prefix: EDIT
 Next: 9
 
-### EDIT-5 · P1 · Line-level editing and word navigation confuse character indices with byte offsets on UTF-8 text
-
-- **Area:** Data
-- **Where:** `src/editor/editing.rs:60-61`, `src/editor/editing.rs:78-79`, `src/editor/editing.rs:146`, `src/editor/editing.rs:162-163`, `src/editor/editing.rs:181`, `src/editor/editing.rs:358-367`, `src/editor/editing.rs:422-431`, `src/editor/editing.rs:511-513`, `src/editor/editing.rs:605-607`, `src/editor/editing.rs:684`, `src/editor/editing.rs:723`, `src/editor/movement.rs:410`, `src/editor/movement.rs:435`, `src/editor/movement.rs:508`, `src/editor/movement.rs:529`, `src/editor.rs:1267-1280`, `src/selection.rs:291-321`
-- **Problem:** `TextPosition::column` is contractually a character index, but multiple line-level editing routines add `column` directly to `line_start` (`ls + column`, `ls + c.column`), or treat raw byte offsets returned by `prev_word_boundary` and `next_word_boundary` as character indices. On lines with multibyte UTF-8 characters:
-1. `prev_word_boundary` and `next_word_boundary` take character columns as byte offsets into line bytes and return byte offsets that callers store into `TextPosition::column`. In `"🦀 word"`, cursor at end of line (col 6) jumps to col 5 (between 'r' and 'd') on `word_left`, and `ctrl_backspace` deletes incorrect text slices.
-2. `select_word_at` treats `pos.column` as a byte index into line bytes and stores raw byte boundaries into `TextPosition::new(pos.line, start/end)`, selecting invalid ranges.
-3. Autoclose skip (`is_close_char`), pair detection (`auto_close_char`), bracket splitting on Enter (`insert_newline`), and pair deletion on Backspace (`backspace`) index raw buffer bytes at `ls + column`. When preceded by multibyte characters, `byte_at(ls + column)` inspects interior continuation bytes or earlier characters. On `"é)"`, typing `)` with the cursor at the end of the line (col 2) reads byte 2 (`')'`) and advances the cursor to column 3 into thin air without inserting anything.
-- **Recommendation:** Use `position_to_byte_offset` or `offset_for_pos` rather than `ls + column` for byte-level inspection. Make `prev_word_boundary`, `next_word_boundary`, and `select_word_at` character-aware (decoding UTF-8 characters or converting between byte offsets and character columns via `GapBuffer`).
-- **Fix with:** none
-- **Effort:** M
-- **Design:** `docs/rfc/EDIT-5-utf8-column-boundaries.md`
-
 ### EDIT-6 · P2 · Terminal resize is delayed by up to 500ms and completely blocked during active input
 
 - **Area:** Concurrency
