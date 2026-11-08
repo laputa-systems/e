@@ -607,7 +607,11 @@ impl Editor {
         let completions = &self.command_buffer.completions;
 
         let cmd_cursor = if self.command_buffer.active {
-            Some(self.command_buffer.prompt.len() + self.command_buffer.cursor)
+            let prompt_chars = self.command_buffer.prompt.chars().count();
+            let input_chars = self.command_buffer.input[..self.command_buffer.cursor]
+                .chars()
+                .count();
+            Some(prompt_chars + input_chars)
         } else {
             None
         };

@@ -75,7 +75,7 @@ impl CommandBuffer {
 
     pub fn display_line(&self) -> String {
         if self.mode == CommandBufferMode::SudoSave {
-            let masked: String = "*".repeat(self.input.len());
+            let masked: String = "*".repeat(self.input.chars().count());
             format!("{}{}", self.prompt, masked)
         } else {
             format!("{}{}", self.prompt, self.input)
@@ -97,29 +97,46 @@ impl CommandBuffer {
             Key::Char(c) => {
                 self.completions.clear();
                 self.input.insert(self.cursor, c);
-                self.cursor += 1;
+                self.cursor += c.len_utf8();
                 CommandBufferResult::Changed(self.input.clone())
             }
             Key::Backspace => {
                 self.completions.clear();
                 if self.cursor > 0 {
-                    self.cursor -= 1;
-                    self.input.remove(self.cursor);
-                    CommandBufferResult::Changed(self.input.clone())
+                    if let Some(ch) = self.input[..self.cursor].chars().next_back() {
+                        let ch_len = ch.len_utf8();
+                        self.cursor -= ch_len;
+                        self.input.remove(self.cursor);
+                        CommandBufferResult::Changed(self.input.clone())
+                    } else {
+                        CommandBufferResult::Continue
+                    }
                 } else {
                     CommandBufferResult::Continue
                 }
             }
             Key::Left => {
-                if self.cursor > 0 {
-                    self.cursor -= 1;
+                if self.cursor > 0
+                    && let Some(ch) = self.input[..self.cursor].chars().next_back()
+                {
+                    self.cursor -= ch.len_utf8();
                 }
                 CommandBufferResult::Continue
             }
             Key::Right => {
-                if self.cursor < self.input.len() {
-                    self.cursor += 1;
+                if self.cursor < self.input.len()
+                    && let Some(ch) = self.input[self.cursor..].chars().next()
+                {
+                    self.cursor += ch.len_utf8();
                 }
+                CommandBufferResult::Continue
+            }
+            Key::Home => {
+                self.cursor = 0;
+                CommandBufferResult::Continue
+            }
+            Key::End => {
+                self.cursor = self.input.len();
                 CommandBufferResult::Continue
             }
             Key::Up => {
@@ -442,5 +459,42 @@ mod tests {
         cb.completions = vec!["comp1".to_string()];
         cb.close();
         assert!(cb.completions.is_empty());
+    }
+
+    #[test]
+    fn test_utf8_char_input_and_navigation() {
+        let mut cb = CommandBuffer::new();
+        cb.open(CommandBufferMode::Command, "> ", "");
+        cb.handle_key(Key::Char('é'));
+        assert_eq!(cb.cursor, 2);
+        cb.handle_key(Key::Char('a'));
+        assert_eq!(cb.cursor, 3);
+        assert_eq!(cb.input, "éa");
+
+        cb.handle_key(Key::Left);
+        assert_eq!(cb.cursor, 2);
+        cb.handle_key(Key::Left);
+        assert_eq!(cb.cursor, 0);
+        cb.handle_key(Key::Right);
+        assert_eq!(cb.cursor, 2);
+        cb.handle_key(Key::End);
+        assert_eq!(cb.cursor, 3);
+        cb.handle_key(Key::Home);
+        assert_eq!(cb.cursor, 0);
+    }
+
+    #[test]
+    fn test_utf8_backspace() {
+        let mut cb = CommandBuffer::new();
+        cb.open(CommandBufferMode::Command, "> ", "");
+        cb.handle_key(Key::Char('🦀'));
+        cb.handle_key(Key::Char('a'));
+        assert_eq!(cb.cursor, 5);
+        cb.handle_key(Key::Backspace);
+        assert_eq!(cb.input, "🦀");
+        assert_eq!(cb.cursor, 4);
+        cb.handle_key(Key::Backspace);
+        assert_eq!(cb.input, "");
+        assert_eq!(cb.cursor, 0);
     }
 }
