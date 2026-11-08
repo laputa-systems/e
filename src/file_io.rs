@@ -685,6 +685,8 @@ fn entry_matches_disk(header: &EntryHeader) -> bool {
     mtime_parts(mtime) == (header.mtime_secs, header.mtime_nanos) && meta.len() == header.file_len
 }
 
+const MAX_PRUNE_CHECKS: usize = 64;
+
 /// Scan entries in a db blob, collecting raw byte ranges of entries whose path
 /// does NOT match `exclude_path` and whose mtime is still valid.
 fn collect_kept_entries<'a>(data: &'a [u8], exclude_path: &[u8]) -> (Vec<&'a [u8]>, u32) {
@@ -698,6 +700,7 @@ fn collect_kept_entries<'a>(data: &'a [u8], exclude_path: &[u8]) -> (Vec<&'a [u8
         Some(c) => c.min(MAX_ENTRIES),
         None => return (kept, 0),
     };
+    let mut checks_remaining = MAX_PRUNE_CHECKS;
     for _ in 0..count {
         let entry_len = match read_u32(data, &mut pos) {
             Some(l) => l as usize,
@@ -711,9 +714,15 @@ fn collect_kept_entries<'a>(data: &'a [u8], exclude_path: &[u8]) -> (Vec<&'a [u8
         let mut header_pos = pos - entry_len;
         if let Some(header) = read_entry_header(data, &mut header_pos)
             && header.path != exclude_path
-            && entry_matches_disk(&header)
         {
-            kept.push(entry_body);
+            if checks_remaining > 0 {
+                checks_remaining -= 1;
+                if entry_matches_disk(&header) {
+                    kept.push(entry_body);
+                }
+            } else {
+                kept.push(entry_body);
+            }
         }
     }
     let kept_count = kept.len() as u32;
@@ -971,6 +980,7 @@ fn collect_cursor_entries<'a>(data: &'a [u8], exclude_path: &[u8]) -> Vec<&'a [u
         Some(c) => c.min(CURSOR_MAX_ENTRIES),
         None => return kept,
     };
+    let mut checks_remaining = MAX_PRUNE_CHECKS;
     for _ in 0..count {
         let len_start = pos;
         let entry_len = match read_u32(data, &mut pos) {
@@ -995,11 +1005,18 @@ fn collect_cursor_entries<'a>(data: &'a [u8], exclude_path: &[u8]) -> Vec<&'a [u
         }
         let entry_path = &data[p..p + path_len];
 
-        if entry_path != exclude_path
-            && let Ok(path_str) = std::str::from_utf8(entry_path)
-            && std::path::Path::new(path_str).exists()
-        {
-            kept.push(&data[len_start..entry_end]);
+        if entry_path != exclude_path {
+            if checks_remaining > 0 {
+                checks_remaining -= 1;
+                let exists = std::str::from_utf8(entry_path)
+                    .map(|p| Path::new(p).exists())
+                    .unwrap_or(false);
+                if exists {
+                    kept.push(&data[len_start..entry_end]);
+                }
+            } else {
+                kept.push(&data[len_start..entry_end]);
+            }
         }
         pos = entry_end;
     }
