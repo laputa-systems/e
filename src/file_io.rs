@@ -62,9 +62,11 @@ pub fn write_file(
         Ok(resolved) => resolved,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             if fs::symlink_metadata(path).is_ok() {
-                // Dangling symlink: creating through it is the only way to
-                // keep the link, and renaming over it would replace it.
-                return write_new_file(path, data);
+                let resolved = resolve_dangling_symlink_target(path.to_path_buf())?;
+                if file_modification_time(&resolved) != expected_mtime {
+                    return Err(changed_on_disk_error());
+                }
+                return write_new_file(&resolved, data);
             }
             path.to_path_buf()
         }
@@ -100,6 +102,27 @@ fn write_new_file(path: &Path, data: &[u8]) -> io::Result<()> {
     file.write_all(data)?;
     file.sync_all()?;
     sync_parent_dir(path)
+}
+
+fn resolve_dangling_symlink_target(mut path: PathBuf) -> io::Result<PathBuf> {
+    for _ in 0..32 {
+        let dest = fs::read_link(&path)?;
+        let next = if dest.is_relative() {
+            path.parent().unwrap_or(Path::new(".")).join(dest)
+        } else {
+            dest
+        };
+        match fs::symlink_metadata(&next) {
+            Ok(meta) if meta.is_symlink() => {
+                path = next;
+            }
+            _ => return Ok(next),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "too many levels of symbolic links",
+    ))
 }
 
 #[derive(PartialEq, Eq)]
@@ -1127,6 +1150,23 @@ mod tests {
         assert_eq!(fs::metadata(&real).unwrap().mode() & 0o7777, 0o640);
         let leftovers: Vec<_> = fs::read_dir(&dir).unwrap().collect();
         assert_eq!(leftovers.len(), 2, "temporary file left behind");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_dangling_symlink_creates_target_file() {
+        let dir = scratch_dir("write_dangling_symlink");
+        let link = dir.join("link.txt");
+        let real = dir.join("real.txt");
+        std::os::unix::fs::symlink("real.txt", &link).unwrap();
+        assert!(!real.exists());
+
+        save_cleaned(&link, b"created via link\n").unwrap();
+
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(fs::read(&real).unwrap(), b"created via link\n");
+        assert_eq!(fs::read(&link).unwrap(), b"created via link\n");
 
         let _ = fs::remove_dir_all(&dir);
     }
