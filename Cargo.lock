@@ -64,6 +64,8 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "laputa-hi-lite"
 version = "0.4.0"
+source = "sparse+https://crates.17166969.xyz/current/registry/"
+checksum = "cb7da635a27ddd0f54743af0fe595c75a327a61ffa54a309e7d22ab68b89c736"
 
 [[package]]
 name = "laputa-ptytest"
