@@ -473,6 +473,10 @@ impl GapBuffer {
         }
     }
 
+    pub fn is_line_ascii(&self, line: usize) -> bool {
+        self.line_ascii.get(line).copied().unwrap_or(false)
+    }
+
     /// Compute the display column at char position `character_column` on `line`.
     /// Tabs count as 2 display columns; every other character counts as 1.
     /// Pass `character_column = usize::MAX` to get the total display width of the line.

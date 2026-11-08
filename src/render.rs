@@ -40,22 +40,28 @@ fn highlight_ansi_code(kind: Kind) -> &'static str {
     }
 }
 
-/// Wraps a `char` for safe terminal output.
-/// Control characters (U+0000–U+001F except tab/newline, and U+007F) are
-/// rendered as `^X` notation in reverse video instead of being written raw,
-/// which would corrupt the terminal by injecting stray escape sequences.
-struct CtrlSafe(char);
-
-impl std::fmt::Display for CtrlSafe {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 as u32 {
-            0..=8 | 11..=31 => write!(
-                f,
-                "{REVERSE}^{}{REVERSE_OFF}",
-                char::from(b'@' + self.0 as u8)
-            ),
-            127 => write!(f, "{REVERSE}^?{REVERSE_OFF}"),
-            _ => write!(f, "{}", self.0),
+#[inline]
+fn write_ctrl_safe(buf: &mut Vec<u8>, ch: char) {
+    let cp = ch as u32;
+    if (0x20..=0x7E).contains(&cp) {
+        buf.push(cp as u8);
+    } else {
+        match cp {
+            0..=8 | 11..=31 => {
+                buf.extend_from_slice(REVERSE.as_bytes());
+                buf.push(b'^');
+                buf.push(b'@' + cp as u8);
+                buf.extend_from_slice(REVERSE_OFF.as_bytes());
+            }
+            127 => {
+                buf.extend_from_slice(REVERSE.as_bytes());
+                buf.extend_from_slice(b"^?");
+                buf.extend_from_slice(REVERSE_OFF.as_bytes());
+            }
+            _ => {
+                let mut b = [0u8; 4];
+                buf.extend_from_slice(ch.encode_utf8(&mut b).as_bytes());
+            }
         }
     }
 }
@@ -142,6 +148,10 @@ pub struct Renderer {
     char_hl_scratch: Vec<Kind>,
     /// Scratch buffer reused each line for find-range display columns.
     find_scratch: Vec<(usize, usize, bool)>,
+    /// Scratch buffer reused each line for secondary cursor display columns.
+    secondary_cursors_scratch: Vec<usize>,
+    /// Scratch buffer reused each line for secondary selection display ranges.
+    secondary_sel_scratch: Vec<(usize, usize)>,
     /// Frame buffer reused each draw to avoid per-frame allocation.
     frame_buf: Vec<u8>,
     /// Scratch buffer for rendering a single screen row (dirty-line tracking).
@@ -187,6 +197,8 @@ impl Renderer {
             hl_scratch: Vec::new(),
             char_hl_scratch: Vec::new(),
             find_scratch: Vec::new(),
+            secondary_cursors_scratch: Vec::new(),
+            secondary_sel_scratch: Vec::new(),
             frame_buf: Vec::new(),
             row_buf: Vec::new(),
             prev_rows: Vec::new(),
@@ -425,11 +437,12 @@ impl Renderer {
                 &mut self.expanded_scratch,
                 &mut self.tab_pipes_scratch,
             );
-            let line_str = String::from_utf8_lossy(&self.expanded_scratch);
-
-            // One-pass scan: count chars.
-            // Replaces the former `chars: Vec<char>` allocation.
-            let character_count = line_str.chars().count();
+            let is_ascii = buffer.is_line_ascii(line_idx);
+            let character_count = if is_ascii {
+                self.expanded_scratch.len()
+            } else {
+                crate::buffer::character_count(&self.expanded_scratch)
+            };
             let total_wraps = crate::viewport::wrapped_rows(character_count, text_cols);
             let start_wrap = if line_idx == viewport.scroll_line {
                 first_wrap
@@ -479,25 +492,26 @@ impl Renderer {
                 m.iter()
                     .any(|(s, e)| line_idx >= s.line && line_idx <= e.line)
             });
-            let line_secondary_cursors: Vec<usize> = secondary_cursors
-                .iter()
-                .filter_map(|pos| {
+
+            self.secondary_cursors_scratch.clear();
+            if !secondary_cursors.is_empty() {
+                for pos in secondary_cursors {
                     if pos.line == line_idx {
-                        Some(display_col_for_character_column(raw_text, pos.column))
-                    } else {
-                        None
+                        self.secondary_cursors_scratch
+                            .push(display_col_for_character_column(raw_text, pos.column));
                     }
-                })
-                .collect();
-            let line_secondary_sel_ranges: Vec<(usize, usize)> = secondary_selections
-                .iter()
-                .filter_map(|selection| {
+                }
+            }
+
+            self.secondary_sel_scratch.clear();
+            if line_has_secondary_sel {
+                for selection in secondary_selections {
                     if selection.is_empty() {
-                        return None;
+                        continue;
                     }
                     let (start, end) = selection.ordered();
                     if line_idx < start.line || line_idx > end.line {
-                        return None;
+                        continue;
                     }
                     let range_start = if line_idx == start.line {
                         display_col_for_character_column(raw_text, start.column)
@@ -509,9 +523,9 @@ impl Renderer {
                     } else {
                         character_count
                     };
-                    Some((range_start, range_end))
-                })
-                .collect();
+                    self.secondary_sel_scratch.push((range_start, range_end));
+                }
+            }
 
             // Pre-compute selection and find ranges once per logical line
             let (line_sel_start, line_sel_end) = if need_per_char {
@@ -593,88 +607,169 @@ impl Renderer {
 
                 if need_per_char
                     || line_has_secondary_sel
-                    || !line_secondary_cursors.is_empty()
+                    || !self.secondary_cursors_scratch.is_empty()
                     || line_has_find
                     || has_bracket
                     || cursor_on_line
                 {
-                    for (i, ch) in line_str
-                        .chars()
-                        .enumerate()
-                        .take(chunk_end)
-                        .skip(chunk_start)
-                    {
-                        let is_cursor = (cursor_on_line && i == cursor_col)
-                            || line_secondary_cursors.contains(&i);
-                        let in_sel = (need_per_char && i >= line_sel_start && i < line_sel_end)
-                            || line_secondary_sel_ranges
+                    if is_ascii {
+                        let chunk = &self.expanded_scratch[chunk_start..chunk_end];
+                        for (offset, &b) in chunk.iter().enumerate() {
+                            let i = chunk_start + offset;
+                            let ch = b as char;
+                            let is_cursor = (cursor_on_line && i == cursor_col)
+                                || self.secondary_cursors_scratch.contains(&i);
+                            let in_sel = (need_per_char && i >= line_sel_start && i < line_sel_end)
+                                || self.secondary_sel_scratch
+                                    .iter()
+                                    .any(|(start, end)| i >= *start && i < *end);
+                            let find_hit = self
+                                .find_scratch
                                 .iter()
-                                .any(|(start, end)| i >= *start && i < *end);
-                        let find_hit = self
-                            .find_scratch
-                            .iter()
-                            .find(|(fs, fe, _)| i >= *fs && i < *fe);
-                        let is_tab_pipe = has_tabs
-                            && i < self.tab_pipes_scratch.len()
-                            && self.tab_pipes_scratch[i];
-                        let is_bracket_match = bracket_match_col == Some(i);
-                        if is_cursor {
-                            let ht = if has_char_hl {
-                                self.char_hl_scratch.get(i).copied().unwrap_or(Kind::Normal)
+                                .find(|(fs, fe, _)| i >= *fs && i < *fe);
+                            let is_tab_pipe = has_tabs
+                                && i < self.tab_pipes_scratch.len()
+                                && self.tab_pipes_scratch[i];
+                            let is_bracket_match = bracket_match_col == Some(i);
+                            if is_cursor {
+                                let ht = if has_char_hl {
+                                    self.char_hl_scratch.get(i).copied().unwrap_or(Kind::Normal)
+                                } else {
+                                    Kind::Normal
+                                };
+                                let code = highlight_ansi_code(ht);
+                                write!(rb, "{code}{CURSOR_STYLE}")?;
+                                write_ctrl_safe(rb, ch);
+                                write!(rb, "{RESET}")?;
+                            } else if in_sel {
+                                if is_tab_pipe {
+                                    write!(rb, "{SEL_TAB_PIPE}{ch}{RESET}")?;
+                                } else {
+                                    write!(rb, "{REVERSE}")?;
+                                    write_ctrl_safe(rb, ch);
+                                    write!(rb, "{RESET}")?;
+                                }
+                            } else if let Some((_, _, is_current)) = find_hit {
+                                if *is_current {
+                                    write!(rb, "{FIND_CURRENT}")?;
+                                } else {
+                                    write!(rb, "{FIND_MATCH}")?;
+                                }
+                                write_ctrl_safe(rb, ch);
+                                write!(rb, "{RESET}")?;
+                            } else if is_bracket_match {
+                                write!(rb, "{BRACKET_MATCH}")?;
+                                write_ctrl_safe(rb, ch);
+                                write!(rb, "{RESET}")?;
+                            } else if is_tab_pipe {
+                                write!(rb, "{DIM}{ch}{RESET}")?;
                             } else {
-                                Kind::Normal
-                            };
-                            let code = highlight_ansi_code(ht);
-                            write!(rb, "{}{CURSOR_STYLE}{}{RESET}", code, CtrlSafe(ch))?;
-                        } else if in_sel {
-                            if is_tab_pipe {
-                                write!(rb, "{SEL_TAB_PIPE}{}{RESET}", ch)?;
-                            } else {
-                                write!(rb, "{REVERSE}{}{RESET}", CtrlSafe(ch))?;
+                                let ht = if has_char_hl {
+                                    self.char_hl_scratch.get(i).copied().unwrap_or(Kind::Normal)
+                                } else {
+                                    Kind::Normal
+                                };
+                                let code = highlight_ansi_code(ht);
+                                if code.is_empty() {
+                                    write_ctrl_safe(rb, ch);
+                                } else {
+                                    write!(rb, "{code}")?;
+                                    write_ctrl_safe(rb, ch);
+                                    write!(rb, "{RESET}")?;
+                                }
                             }
-                        } else if let Some((_, _, is_current)) = find_hit {
-                            if *is_current {
-                                write!(rb, "{FIND_CURRENT}{}{RESET}", CtrlSafe(ch))?;
+                        }
+                    } else {
+                        let line_str = String::from_utf8_lossy(&self.expanded_scratch);
+                        for (i, ch) in line_str
+                            .chars()
+                            .enumerate()
+                            .take(chunk_end)
+                            .skip(chunk_start)
+                        {
+                            let is_cursor = (cursor_on_line && i == cursor_col)
+                                || self.secondary_cursors_scratch.contains(&i);
+                            let in_sel = (need_per_char && i >= line_sel_start && i < line_sel_end)
+                                || self.secondary_sel_scratch
+                                    .iter()
+                                    .any(|(start, end)| i >= *start && i < *end);
+                            let find_hit = self
+                                .find_scratch
+                                .iter()
+                                .find(|(fs, fe, _)| i >= *fs && i < *fe);
+                            let is_tab_pipe = has_tabs
+                                && i < self.tab_pipes_scratch.len()
+                                && self.tab_pipes_scratch[i];
+                            let is_bracket_match = bracket_match_col == Some(i);
+                            if is_cursor {
+                                let ht = if has_char_hl {
+                                    self.char_hl_scratch.get(i).copied().unwrap_or(Kind::Normal)
+                                } else {
+                                    Kind::Normal
+                                };
+                                let code = highlight_ansi_code(ht);
+                                write!(rb, "{code}{CURSOR_STYLE}")?;
+                                write_ctrl_safe(rb, ch);
+                                write!(rb, "{RESET}")?;
+                            } else if in_sel {
+                                if is_tab_pipe {
+                                    write!(rb, "{SEL_TAB_PIPE}{ch}{RESET}")?;
+                                } else {
+                                    write!(rb, "{REVERSE}")?;
+                                    write_ctrl_safe(rb, ch);
+                                    write!(rb, "{RESET}")?;
+                                }
+                            } else if let Some((_, _, is_current)) = find_hit {
+                                if *is_current {
+                                    write!(rb, "{FIND_CURRENT}")?;
+                                } else {
+                                    write!(rb, "{FIND_MATCH}")?;
+                                }
+                                write_ctrl_safe(rb, ch);
+                                write!(rb, "{RESET}")?;
+                            } else if is_bracket_match {
+                                write!(rb, "{BRACKET_MATCH}")?;
+                                write_ctrl_safe(rb, ch);
+                                write!(rb, "{RESET}")?;
+                            } else if is_tab_pipe {
+                                write!(rb, "{DIM}{ch}{RESET}")?;
                             } else {
-                                write!(rb, "{FIND_MATCH}{}{RESET}", CtrlSafe(ch))?;
-                            }
-                        } else if is_bracket_match {
-                            write!(rb, "{BRACKET_MATCH}{}{RESET}", CtrlSafe(ch))?;
-                        } else if is_tab_pipe {
-                            write!(rb, "{DIM}{}{RESET}", ch)?;
-                        } else {
-                            let ht = if has_char_hl {
-                                self.char_hl_scratch.get(i).copied().unwrap_or(Kind::Normal)
-                            } else {
-                                Kind::Normal
-                            };
-                            let code = highlight_ansi_code(ht);
-                            if code.is_empty() {
-                                write!(rb, "{}", CtrlSafe(ch))?;
-                            } else {
-                                write!(rb, "{}{}{RESET}", code, CtrlSafe(ch))?;
+                                let ht = if has_char_hl {
+                                    self.char_hl_scratch.get(i).copied().unwrap_or(Kind::Normal)
+                                } else {
+                                    Kind::Normal
+                                };
+                                let code = highlight_ansi_code(ht);
+                                if code.is_empty() {
+                                    write_ctrl_safe(rb, ch);
+                                } else {
+                                    write!(rb, "{code}")?;
+                                    write_ctrl_safe(rb, ch);
+                                    write!(rb, "{RESET}")?;
+                                }
                             }
                         }
                     }
                 } else {
                     // Fast path: syntax highlighting only (no cursor on this line)
                     let mut current_hl = Kind::Normal;
-                    for (i, ch) in line_str
-                        .chars()
-                        .enumerate()
-                        .take(chunk_end)
-                        .skip(chunk_start)
-                    {
-                        let is_tab_pipe = has_tabs
-                            && i < self.tab_pipes_scratch.len()
-                            && self.tab_pipes_scratch[i];
-                        if is_tab_pipe {
-                            if current_hl != Kind::Normal {
-                                write!(rb, "{RESET}")?;
-                                current_hl = Kind::Normal;
+                    if is_ascii {
+                        let chunk = &self.expanded_scratch[chunk_start..chunk_end];
+                        for (offset, &b) in chunk.iter().enumerate() {
+                            let i = chunk_start + offset;
+                            let is_tab_pipe = has_tabs
+                                && i < self.tab_pipes_scratch.len()
+                                && self.tab_pipes_scratch[i];
+                            if is_tab_pipe {
+                                if current_hl != Kind::Normal {
+                                    rb.extend_from_slice(RESET.as_bytes());
+                                    current_hl = Kind::Normal;
+                                }
+                                rb.extend_from_slice(DIM.as_bytes());
+                                rb.push(b'|');
+                                rb.extend_from_slice(RESET.as_bytes());
+                                continue;
                             }
-                            write!(rb, "{DIM}{}{RESET}", ch)?;
-                        } else {
                             let ht = if has_char_hl {
                                 self.char_hl_scratch.get(i).copied().unwrap_or(Kind::Normal)
                             } else {
@@ -682,23 +777,61 @@ impl Renderer {
                             };
                             if ht != current_hl {
                                 if ht == Kind::Normal {
-                                    write!(rb, "{RESET}")?;
+                                    rb.extend_from_slice(RESET.as_bytes());
                                 } else {
-                                    write!(rb, "{}", highlight_ansi_code(ht))?;
+                                    rb.extend_from_slice(RESET.as_bytes());
+                                    rb.extend_from_slice(highlight_ansi_code(ht).as_bytes());
                                 }
                                 current_hl = ht;
                             }
-                            write!(rb, "{}", CtrlSafe(ch))?;
+                            write_ctrl_safe(rb, b as char);
+                        }
+                    } else {
+                        let line_str = String::from_utf8_lossy(&self.expanded_scratch);
+                        for (i, ch) in line_str
+                            .chars()
+                            .enumerate()
+                            .take(chunk_end)
+                            .skip(chunk_start)
+                        {
+                            let is_tab_pipe = has_tabs
+                                && i < self.tab_pipes_scratch.len()
+                                && self.tab_pipes_scratch[i];
+                            if is_tab_pipe {
+                                if current_hl != Kind::Normal {
+                                    rb.extend_from_slice(RESET.as_bytes());
+                                    current_hl = Kind::Normal;
+                                }
+                                rb.extend_from_slice(DIM.as_bytes());
+                                rb.push(b'|');
+                                rb.extend_from_slice(RESET.as_bytes());
+                                continue;
+                            }
+                            let ht = if has_char_hl {
+                                self.char_hl_scratch.get(i).copied().unwrap_or(Kind::Normal)
+                            } else {
+                                Kind::Normal
+                            };
+                            if ht != current_hl {
+                                if ht == Kind::Normal {
+                                    rb.extend_from_slice(RESET.as_bytes());
+                                } else {
+                                    rb.extend_from_slice(RESET.as_bytes());
+                                    rb.extend_from_slice(highlight_ansi_code(ht).as_bytes());
+                                }
+                                current_hl = ht;
+                            }
+                            write_ctrl_safe(rb, ch);
                         }
                     }
                     if current_hl != Kind::Normal {
-                        write!(rb, "{RESET}")?;
+                        rb.extend_from_slice(RESET.as_bytes());
                     }
                 }
 
                 // End-of-line cursor: draw reverse-video space when cursor is past last char
                 let cursor_at_eol = (cursor_on_line && cursor_col == chunk_end)
-                    || line_secondary_cursors
+                    || self.secondary_cursors_scratch
                         .iter()
                         .any(|column| *column == chunk_end && chunk_end == character_count);
                 if cursor_at_eol && chunk_end == character_count {
