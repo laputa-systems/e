@@ -200,6 +200,15 @@ mod tests {
         a.iter().map(|s| s.to_string()).collect()
     }
 
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("e_test_{}_{}_{name}", std::process::id(), id));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn test_load_too_many_args() {
         let result = load(&args(&["e", "a", "b"]), false, None, |_| Ok(true));
@@ -217,8 +226,7 @@ mod tests {
 
     #[test]
     fn test_load_binary_declined() {
-        let dir = std::env::temp_dir().join("e_test_main_binary");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = scratch_dir("main_binary");
         let path = dir.join("data.bin");
         // Write enough null bytes to trigger binary detection
         let mut data = vec![0u8; 512];
@@ -239,8 +247,7 @@ mod tests {
 
     #[test]
     fn test_load_binary_accepted() {
-        let dir = std::env::temp_dir().join("e_test_main_binary_ok");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = scratch_dir("main_binary_ok");
         let path = dir.join("data.bin");
         let mut data = vec![0u8; 512];
         data[0] = 0x7f;
@@ -261,8 +268,7 @@ mod tests {
 
     #[test]
     fn test_load_reports_failed_confirmation() {
-        let dir = std::env::temp_dir().join("e_test_main_confirm_error");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = scratch_dir("main_confirm_error");
         let path = dir.join("data.bin");
         std::fs::write(&path, vec![0u8; 512]).unwrap();
 

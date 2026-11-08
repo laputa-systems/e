@@ -39,6 +39,15 @@ fn set_sel(e: &mut Editor, selection: Selection) {
     e.set_selection(selection);
 }
 
+fn scratch_dir(name: &str) -> std::path::PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("e_test_{}_{}_{name}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 
 #[test]
 fn test_move_up_down_with_desired_col_stickiness() {
@@ -856,8 +865,7 @@ fn test_handle_cmd_result_submit_goto() {
 
 #[test]
 fn test_handle_cmd_result_submit_prompt() {
-    let dir = std::env::temp_dir().join("e_test_cmd_prompt");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = scratch_dir("cmd_prompt");
     let path = dir.join("test.txt");
     let mut e = ed("hello");
     e.handle_cmd_result(
@@ -955,8 +963,7 @@ fn test_handle_event_unsupported_ctrl_shift_down() {
 
 #[test]
 fn test_quit_scratch_dirty_y_then_save_as() {
-    let dir = std::env::temp_dir().join("e_test_quit_scratch");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = scratch_dir("quit_scratch");
     let path = dir.join("out.txt");
     let mut e = ed("hello");
     e.document.is_dirty = true;
@@ -1727,8 +1734,7 @@ fn test_handle_key_unknown_does_nothing() {
 
 #[test]
 fn test_keybinding_save() {
-    let dir = std::env::temp_dir().join("e_test_kb_save");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = scratch_dir("kb_save");
     let path = dir.join("test.txt");
     std::fs::write(&path, b"hello").unwrap();
     let mut e = ed_named("hello", path.to_str().unwrap());
@@ -2431,8 +2437,7 @@ fn test_cut_no_selection_noop() {
 
 #[test]
 fn test_execute_command_save_as_file() {
-    let dir = std::env::temp_dir().join("e_test_save_as_cmd");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = scratch_dir("save_as_cmd");
     let path = dir.join("new.txt");
     let mut e = ed("hello");
     let cmd = format!("save {}", path.to_str().unwrap());
@@ -2507,8 +2512,7 @@ fn test_command_completion_common_prefix() {
 
 #[test]
 fn test_dismiss_reload_updates_mtime() {
-    let dir = std::env::temp_dir().join("e_test_dismiss");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = scratch_dir("dismiss");
     let path = dir.join("test.txt");
     std::fs::write(&path, b"original").unwrap();
     let mut e = ed_named("original", path.to_str().unwrap());
@@ -2531,8 +2535,7 @@ fn test_dismiss_reload_updates_mtime() {
 
 #[test]
 fn test_reload_clamps_cursor() {
-    let dir = std::env::temp_dir().join("e_test_reload_clamp");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = scratch_dir("reload_clamp");
     let path = dir.join("test.txt");
     std::fs::write(&path, b"line1\nline2\nline3\n").unwrap();
 
@@ -2560,8 +2563,7 @@ fn test_no_reload_for_unnamed() {
 
 #[test]
 fn test_focus_in_event() {
-    let dir = std::env::temp_dir().join("e_test_focus_in");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = scratch_dir("focus_in");
     let path = dir.join("test.txt");
     std::fs::write(&path, b"original").unwrap();
 
@@ -2581,9 +2583,7 @@ fn test_focus_in_event() {
 fn test_sudo_save_refuses_when_file_changed_during_prompt() {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = std::env::temp_dir().join("e_test_sudo_mtime");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch_dir("sudo_mtime");
     let path = dir.join("owned.txt");
     std::fs::write(&path, b"newer\n").unwrap();
     let log = dir.join("sudo.log");
@@ -2627,9 +2627,7 @@ fn test_sudo_save_refuses_when_file_changed_during_prompt() {
 
 #[test]
 fn test_save_updates_mtime() {
-    let dir = std::env::temp_dir().join("e_test_save_mtime");
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = scratch_dir("save_mtime");
     let path = dir.join("test.txt");
 
     let mut e = ed_named("hello\n", path.to_str().unwrap());
@@ -3526,9 +3524,7 @@ fn test_cancelled_save_as_during_quit_returns_to_editing() {
 
 #[test]
 fn test_failed_save_as_keeps_previous_file_path() {
-    let dir = std::env::temp_dir().join("e_test_save_as_failure");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch_dir("save_as_failure");
     let blocker = dir.join("not_a_dir");
     std::fs::write(&blocker, b"x").unwrap();
     let mut e = ed("hello");
@@ -3542,9 +3538,7 @@ fn test_failed_save_as_keeps_previous_file_path() {
 
 #[test]
 fn test_quit_with_failed_save_keeps_editor_open() {
-    let dir = std::env::temp_dir().join("e_test_quit_failed_save");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch_dir("quit_failed_save");
     let blocker = dir.join("not_a_dir");
     std::fs::write(&blocker, b"x").unwrap();
     let mut e = ed_named("hello", blocker.join("sub/out.txt").to_str().unwrap());
@@ -3561,9 +3555,7 @@ fn test_quit_with_failed_save_keeps_editor_open() {
 
 #[test]
 fn test_save_refuses_file_changed_on_disk() {
-    let dir = std::env::temp_dir().join("e_test_save_conflict");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch_dir("save_conflict");
     let path = dir.join("test.txt");
     std::fs::write(&path, b"original\n").unwrap();
     let mut e = ed_named("original\n", path.to_str().unwrap());
@@ -3585,9 +3577,7 @@ fn test_save_refuses_file_changed_on_disk() {
 
 #[test]
 fn test_save_preserves_invalid_utf8_and_crlf_bytes() {
-    let dir = std::env::temp_dir().join("e_test_save_bytes");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch_dir("save_bytes");
     let path = dir.join("latin1.txt");
     let bytes = b"caf\xe9\r\nline2\xc2\xa0\r\n";
     std::fs::write(&path, bytes).unwrap();

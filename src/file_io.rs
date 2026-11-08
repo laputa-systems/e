@@ -1216,8 +1216,7 @@ mod tests {
 
     #[test]
     fn test_file_size() {
-        let dir = std::env::temp_dir().join("e_test_size");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("size");
         let path = dir.join("test.txt");
 
         fs::write(&path, b"12345").unwrap();
@@ -1272,8 +1271,7 @@ mod tests {
 
     #[test]
     fn test_undo_history_roundtrip() {
-        let dir = std::env::temp_dir().join("e_test_undo_rt");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("undo_rt");
         let path = dir.join("test.txt");
         let db = dir.join("undo.bin");
         fs::write(&path, b"hel").unwrap();
@@ -1298,8 +1296,7 @@ mod tests {
 
     #[test]
     fn test_undo_history_with_redo() {
-        let dir = std::env::temp_dir().join("e_test_undo_redo");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("undo_redo");
         let path = dir.join("test.txt");
         let db = dir.join("undo.bin");
         fs::write(&path, b"hel").unwrap();
@@ -1319,8 +1316,7 @@ mod tests {
 
     #[test]
     fn test_undo_history_mtime_mismatch() {
-        let dir = std::env::temp_dir().join("e_test_undo_mtime");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("undo_mtime");
         let path = dir.join("test.txt");
         let db = dir.join("undo.bin");
         fs::write(&path, b"hello").unwrap();
@@ -1384,8 +1380,7 @@ mod tests {
 
     #[test]
     fn test_undo_history_corrupt_db() {
-        let dir = std::env::temp_dir().join("e_test_undo_corrupt");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("undo_corrupt");
         let path = dir.join("test.txt");
         let db = dir.join("undo.bin");
         fs::write(&path, b"hello").unwrap();
@@ -1402,8 +1397,7 @@ mod tests {
 
     #[test]
     fn test_undo_history_empty_stacks() {
-        let dir = std::env::temp_dir().join("e_test_undo_empty");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("undo_empty");
         let path = dir.join("test.txt");
         let db = dir.join("undo.bin");
         fs::write(&path, b"hello").unwrap();
@@ -1422,8 +1416,7 @@ mod tests {
 
     #[test]
     fn test_undo_history_bad_magic() {
-        let dir = std::env::temp_dir().join("e_test_undo_magic");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("undo_magic");
         let path = dir.join("test.txt");
         let db = dir.join("undo.bin");
         fs::write(&path, b"hello").unwrap();
@@ -1440,8 +1433,7 @@ mod tests {
 
     #[test]
     fn test_undo_history_bad_version() {
-        let dir = std::env::temp_dir().join("e_test_undo_ver");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("undo_ver");
         let path = dir.join("test.txt");
         let db = dir.join("undo.bin");
         fs::write(&path, b"hello").unwrap();
@@ -1462,8 +1454,7 @@ mod tests {
 
     #[test]
     fn test_undo_history_multiple_files() {
-        let dir = std::env::temp_dir().join("e_test_undo_multi");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("undo_multi");
         let path_a = dir.join("a.txt");
         let path_b = dir.join("b.txt");
         let db = dir.join("undo.bin");
@@ -1499,8 +1490,7 @@ mod tests {
 
     #[test]
     fn test_undo_history_update_replaces_entry() {
-        let dir = std::env::temp_dir().join("e_test_undo_replace");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("undo_replace");
         let path = dir.join("test.txt");
         let db = dir.join("undo.bin");
         fs::write(&path, b"hello").unwrap();
@@ -1530,8 +1520,7 @@ mod tests {
 
     #[test]
     fn test_undo_history_prunes_stale_entries() {
-        let dir = std::env::temp_dir().join("e_test_undo_prune");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("undo_prune");
         let path_a = dir.join("a.txt");
         let path_b = dir.join("b.txt");
         let db = dir.join("undo.bin");
@@ -1571,8 +1560,7 @@ mod tests {
 
     #[test]
     fn test_undo_history_prunes_deleted_file() {
-        let dir = std::env::temp_dir().join("e_test_undo_deleted");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("undo_deleted");
         let path_a = dir.join("a.txt");
         let path_b = dir.join("b.txt");
         let db = dir.join("undo.bin");
@@ -1599,7 +1587,9 @@ mod tests {
     }
 
     fn scratch_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("e_test_{name}"));
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("e_test_{}_{}_{name}", std::process::id(), id));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -1657,8 +1647,7 @@ mod tests {
 
     #[test]
     fn test_file_mtime_exists() {
-        let dir = std::env::temp_dir().join("e_test_mtime_exists");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("mtime_exists");
         let path = dir.join("test.txt");
         fs::write(&path, b"hello").unwrap();
         assert!(file_modification_time(&path).is_some());
@@ -1681,8 +1670,7 @@ mod tests {
     #[test]
     fn test_resolve_absolute_new_file() {
         // resolve_absolute for a file that doesn't exist yet
-        let dir = std::env::temp_dir().join("e_test_resolve");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("resolve");
         let new_file = dir.join("brand_new.txt");
         let result = resolve_absolute(&new_file);
         assert!(result.is_absolute());
@@ -1732,8 +1720,7 @@ mod tests {
 
     #[test]
     fn test_undo_history_no_db_file() {
-        let dir = std::env::temp_dir().join("e_test_undo_nodb");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("undo_nodb");
         let path = dir.join("test.txt");
         let db = dir.join("nonexistent.bin");
         fs::write(&path, b"hello").unwrap();
@@ -1751,8 +1738,7 @@ mod tests {
 
     #[test]
     fn test_cursor_position_roundtrip() {
-        let dir = std::env::temp_dir().join("e_test_cursor_rt");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("cursor_rt");
         let path = dir.join("test.txt");
         let db = dir.join("cursor.bin");
         fs::write(&path, b"hello\nworld\n").unwrap();
@@ -1766,8 +1752,7 @@ mod tests {
 
     #[test]
     fn test_cursor_position_update() {
-        let dir = std::env::temp_dir().join("e_test_cursor_upd");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("cursor_upd");
         let path = dir.join("test.txt");
         let db = dir.join("cursor.bin");
         fs::write(&path, b"hello").unwrap();
@@ -1782,8 +1767,7 @@ mod tests {
 
     #[test]
     fn test_cursor_position_multiple_files() {
-        let dir = std::env::temp_dir().join("e_test_cursor_multi");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("cursor_multi");
         let path_a = dir.join("a.txt");
         let path_b = dir.join("b.txt");
         let db = dir.join("cursor.bin");
@@ -1807,8 +1791,7 @@ mod tests {
 
     #[test]
     fn test_cursor_position_no_db() {
-        let dir = std::env::temp_dir().join("e_test_cursor_nodb");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("cursor_nodb");
         let path = dir.join("test.txt");
         let db = dir.join("nonexistent.bin");
         fs::write(&path, b"hello").unwrap();
@@ -1820,8 +1803,7 @@ mod tests {
 
     #[test]
     fn test_cursor_position_prunes_deleted_files() {
-        let dir = std::env::temp_dir().join("e_test_cursor_prune");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("cursor_prune");
         let path_a = dir.join("a.txt");
         let path_b = dir.join("b.txt");
         let db = dir.join("cursor.bin");
@@ -1850,8 +1832,7 @@ mod tests {
 
     #[test]
     fn test_cursor_position_corrupt_db() {
-        let dir = std::env::temp_dir().join("e_test_cursor_corrupt");
-        let _ = fs::create_dir_all(&dir);
+        let dir = scratch_dir("cursor_corrupt");
         let path = dir.join("test.txt");
         let db = dir.join("cursor.bin");
         fs::write(&path, b"hello").unwrap();
