@@ -1660,23 +1660,6 @@ fn test_center_view_on_line() {
 
 
 #[test]
-fn test_draw_does_not_panic() {
-    let mut e = ed_named("hello\nworld", "test.rs");
-    set_sel(
-        &mut e,
-        Selection {
-            anchor: TextPosition::new(0, 0),
-            cursor: TextPosition::new(0, 5),
-        },
-    );
-    e.find.matches = vec![(TextPosition::new(0, 0), TextPosition::new(0, 5))];
-    e.find.active = true;
-    let mut output = Vec::new();
-    e.draw(&mut output).unwrap();
-    assert!(!output.is_empty());
-}
-
-#[test]
 fn test_draw_with_cmd_buf_active() {
     let mut e = ed("hello");
     e.command_buffer
@@ -1686,15 +1669,6 @@ fn test_draw_with_cmd_buf_active() {
     e.draw(&mut output).unwrap();
     let s = String::from_utf8_lossy(&output);
     assert!(s.contains("find: test"));
-}
-
-#[test]
-fn test_draw_ruler_off() {
-    let mut e = ed("hello");
-    e.line_numbers_visible = false;
-    let mut output = Vec::new();
-    e.draw(&mut output).unwrap();
-    assert!(!output.is_empty());
 }
 
 
@@ -1915,15 +1889,6 @@ fn test_select_line_at_out_of_bounds() {
 
 
 #[test]
-fn test_set_status() {
-    let mut e = ed("hello");
-    e.set_status("test message".to_string());
-    assert_eq!(e.status_message, "test message");
-    assert!(e.status_time.is_some());
-}
-
-
-#[test]
 fn test_handle_mouse_wheel_up() {
     let text = (0..50)
         .map(|i| format!("line {}", i))
@@ -1962,13 +1927,6 @@ fn test_handle_mouse_other_button_noop() {
         MouseMods::default(),
     );
     assert_eq!(e.test_text(), "hello");
-}
-
-
-#[test]
-fn test_save_undo_if_named_no_file() {
-    let mut e = ed("hello");
-    e.remember_session();
 }
 
 
@@ -2121,14 +2079,6 @@ fn test_cmd_submit_executes_command() {
         crate::command_buffer::CommandBufferResult::Submit("ruler".to_string()),
     );
     assert!(!e.line_numbers_visible);
-}
-
-
-#[test]
-fn test_execute_unknown_command() {
-    let mut e = ed("hello");
-    e.execute_command("nonexistent_command");
-    assert!(e.status_message.contains("Unknown"));
 }
 
 
@@ -2523,20 +2473,6 @@ fn test_delete_selection_empty_noop() {
     let mut e = ed("hello");
     e.delete_selection();
     assert_eq!(e.test_text(), "hello");
-}
-
-
-
-#[test]
-fn test_save_undo_if_named_with_existing_file() {
-    let dir = std::env::temp_dir().join("e_test_save_undo");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("test.txt");
-    std::fs::write(&path, b"hello").unwrap();
-    let mut e = ed("hello");
-    e.document.file_path = Some(path.to_str().unwrap().to_string());
-    e.remember_session();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 

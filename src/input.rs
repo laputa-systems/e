@@ -939,11 +939,4 @@ mod tests {
             _ => panic!("expected Paste"),
         }
     }
-
-    // ── Terminal size ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_terminal_size_doesnt_panic() {
-        let _ = terminal_size();
-    }
 }

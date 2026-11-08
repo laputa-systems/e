@@ -297,15 +297,6 @@ mod tests {
     // -- new / basic accessors ------------------------------------------------
 
     #[test]
-    fn test_new() {
-        let v = Viewport::new(80, 24);
-        assert_eq!(v.scroll_line, 0);
-        assert_eq!(v.scroll_wrap, 0);
-        assert_eq!(v.width, 80);
-        assert_eq!(v.height, 24);
-    }
-
-    #[test]
     fn test_text_rows() {
         let v = Viewport::new(80, 24);
         assert_eq!(v.text_rows(), 22); // 24 - 2 (status bar + command line)

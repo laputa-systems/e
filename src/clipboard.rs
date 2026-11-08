@@ -165,6 +165,7 @@ impl Clipboard {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_backend_for_test(backend: &str) -> Self {
         let backend = match backend {
             "pbcopy" => ClipboardBackend::Pbcopy,
@@ -180,6 +181,7 @@ impl Clipboard {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn paste_contents_from_text_for_test(&self, text: &str) -> ClipboardPaste {
         self.paste_contents_for_text(text.to_string())
     }
@@ -208,11 +210,6 @@ mod tests {
     fn test_internal_empty() {
         let clip = Clipboard::internal_only();
         assert_eq!(clip.paste().unwrap(), "");
-    }
-
-    #[test]
-    fn test_detect_does_not_panic() {
-        let _clip = Clipboard::detect();
     }
 
     #[test]

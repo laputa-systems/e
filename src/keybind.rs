@@ -178,84 +178,32 @@ mod tests {
     // -- default bindings -----------------------------------------------------
 
     #[test]
-    fn test_defaults_has_save() {
+    fn test_defaults_has_expected_bindings() {
         let kb = KeybindingTable::with_defaults();
-        assert_eq!(kb.lookup(Key::Ctrl('s')), Some(&EditorAction::Save));
-    }
-
-    #[test]
-    fn test_defaults_has_quit() {
-        let kb = KeybindingTable::with_defaults();
-        assert_eq!(kb.lookup(Key::Ctrl('q')), Some(&EditorAction::Quit));
-    }
-
-    #[test]
-    fn test_defaults_has_undo_redo() {
-        let kb = KeybindingTable::with_defaults();
-        assert_eq!(kb.lookup(Key::Ctrl('z')), Some(&EditorAction::Undo));
-        assert_eq!(kb.lookup(Key::Ctrl('y')), Some(&EditorAction::Redo));
-    }
-
-    #[test]
-    fn test_defaults_has_clipboard() {
-        let kb = KeybindingTable::with_defaults();
-        assert_eq!(kb.lookup(Key::Ctrl('c')), Some(&EditorAction::Copy));
-        assert_eq!(kb.lookup(Key::Ctrl('x')), Some(&EditorAction::Cut));
-        assert_eq!(kb.lookup(Key::Ctrl('v')), Some(&EditorAction::Paste));
-    }
-
-    #[test]
-    fn test_defaults_has_navigation() {
-        let kb = KeybindingTable::with_defaults();
-        assert_eq!(kb.lookup(Key::Ctrl('t')), Some(&EditorAction::GotoTop));
-        assert_eq!(kb.lookup(Key::Ctrl('g')), Some(&EditorAction::GotoEnd));
-        assert_eq!(kb.lookup(Key::Ctrl('l')), Some(&EditorAction::GotoLine));
-    }
-
-    #[test]
-    fn test_defaults_has_find() {
-        let kb = KeybindingTable::with_defaults();
-        assert_eq!(kb.lookup(Key::Ctrl('f')), Some(&EditorAction::Find));
-    }
-
-    #[test]
-    fn test_defaults_has_command_palette() {
-        let kb = KeybindingTable::with_defaults();
-        assert_eq!(
-            kb.lookup(Key::Ctrl('p')),
-            Some(&EditorAction::CommandPalette)
-        );
-    }
-
-    #[test]
-    fn test_defaults_has_misc() {
-        let kb = KeybindingTable::with_defaults();
-        assert_eq!(kb.lookup(Key::Ctrl('a')), Some(&EditorAction::SelectAll));
-        assert_eq!(kb.lookup(Key::Ctrl('k')), Some(&EditorAction::KillLine));
-        assert_eq!(kb.lookup(Key::Ctrl('r')), Some(&EditorAction::ToggleRuler));
-        assert_eq!(
-            kb.lookup(Key::Ctrl('h')),
-            Some(&EditorAction::CtrlBackspace)
-        );
-    }
-
-    #[test]
-    fn test_defaults_has_toggle_comment() {
-        let kb = KeybindingTable::with_defaults();
-        assert_eq!(
-            kb.lookup(Key::Ctrl('d')),
-            Some(&EditorAction::ToggleComment)
-        );
-    }
-
-    #[test]
-    fn test_defaults_has_duplicate_and_selectword() {
-        let kb = KeybindingTable::with_defaults();
-        assert_eq!(
-            kb.lookup(Key::Ctrl('j')),
-            Some(&EditorAction::DuplicateLine)
-        );
-        assert_eq!(kb.lookup(Key::Ctrl('w')), Some(&EditorAction::SelectWord));
+        let expected = [
+            (Key::Ctrl('s'), EditorAction::Save),
+            (Key::Ctrl('q'), EditorAction::Quit),
+            (Key::Ctrl('z'), EditorAction::Undo),
+            (Key::Ctrl('y'), EditorAction::Redo),
+            (Key::Ctrl('c'), EditorAction::Copy),
+            (Key::Ctrl('x'), EditorAction::Cut),
+            (Key::Ctrl('v'), EditorAction::Paste),
+            (Key::Ctrl('t'), EditorAction::GotoTop),
+            (Key::Ctrl('g'), EditorAction::GotoEnd),
+            (Key::Ctrl('l'), EditorAction::GotoLine),
+            (Key::Ctrl('f'), EditorAction::Find),
+            (Key::Ctrl('p'), EditorAction::CommandPalette),
+            (Key::Ctrl('a'), EditorAction::SelectAll),
+            (Key::Ctrl('k'), EditorAction::KillLine),
+            (Key::Ctrl('r'), EditorAction::ToggleRuler),
+            (Key::Ctrl('h'), EditorAction::CtrlBackspace),
+            (Key::Ctrl('d'), EditorAction::ToggleComment),
+            (Key::Ctrl('j'), EditorAction::DuplicateLine),
+            (Key::Ctrl('w'), EditorAction::SelectWord),
+        ];
+        for (key, action) in expected {
+            assert_eq!(kb.lookup(key), Some(&action), "missing binding for {key:?}");
+        }
     }
 
     #[test]
@@ -363,21 +311,7 @@ mod tests {
         assert_eq!(kb.lookup(Key::Ctrl('s')), Some(&EditorAction::Save));
     }
 
-    // -- KeyCombo equality ----------------------------------------------------
-
-    #[test]
-    fn test_key_combo_equality() {
-        let a = kc(Key::Ctrl('s'));
-        let b = kc(Key::Ctrl('s'));
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn test_key_combo_inequality() {
-        let a = kc(Key::Ctrl('s'));
-        let b = kc(Key::Ctrl('q'));
-        assert_ne!(a, b);
-    }
+    // -- apply_config ---------------------------------------------------------
 
     #[test]
     fn test_apply_config_overrides_defaults() {

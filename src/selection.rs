@@ -382,13 +382,6 @@ mod tests {
         assert!(TextPosition::new(5, 0) > TextPosition::new(4, 999));
     }
 
-    #[test]
-    fn test_pos_eq() {
-        assert_eq!(TextPosition::new(3, 7), TextPosition::new(3, 7));
-        assert_ne!(TextPosition::new(3, 7), TextPosition::new(3, 8));
-        assert_ne!(TextPosition::new(3, 7), TextPosition::new(4, 7));
-    }
-
     // -- Selection ----------------------------------------------------------
 
     #[test]

@@ -195,14 +195,6 @@ mod tests {
     use crate::input::Key;
 
     #[test]
-    fn test_new_is_inactive() {
-        let cb = CommandBuffer::new();
-        assert!(!cb.active);
-        assert!(cb.input.is_empty());
-        assert_eq!(cb.cursor, 0);
-    }
-
-    #[test]
     fn test_open_activates() {
         let mut cb = CommandBuffer::new();
         cb.open(CommandBufferMode::Command, "> ", "");

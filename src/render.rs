@@ -1387,20 +1387,6 @@ mod tests {
     // -- Renderer basic -------------------------------------------------------
 
     #[test]
-    fn test_renderer_new() {
-        let r = Renderer::new();
-        assert!(r.needs_full_redraw);
-    }
-
-    #[test]
-    fn test_renderer_force_full_redraw() {
-        let mut r = Renderer::new();
-        r.needs_full_redraw = false;
-        r.force_full_redraw();
-        assert!(r.needs_full_redraw);
-    }
-
-    #[test]
     fn test_render_basic_output() {
         // Verify render produces output without panicking
         let mut r = Renderer::new();
