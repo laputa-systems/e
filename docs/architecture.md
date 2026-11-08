@@ -17,4 +17,4 @@ e edits one file at a time. The ownership chain is `main.rs` → `Editor` → `D
 | PTY E2E tests | `tests/e2e/` |
 | Benchmarks | `benches/bench.rs` |
 
-The syntax highlighter is the `laputa-hi-lite` dependency. Cargo resolves it from crates.io; see [build and release](build-and-release.md) for local dependency work.
+The syntax highlighter is the `laputa-hi-lite` dependency. Cargo resolves it through the registry configuration in `.cargo/config.toml`; see [build and release](build-and-release.md) for local dependency work.

@@ -2,11 +2,11 @@
 
 The Rust toolchain is pinned in `rust-toolchain.toml`. `make build` runs a development build. `make release` builds a stripped release for `TARGET`; the default is the host target, with Linux defaulting to a statically linked musl binary. `make install` copies the release binary to `~/.local/bin/e` and ad-hoc signs it on macOS.
 
-The `make lint` target passes `--fix` to Clippy and can modify source files. For a read-only check, run `cargo clippy --locked --all-targets --all-features -- --deny warnings`.
+`make lint` runs Clippy across the workspace without modifying source files (`cargo clippy --workspace --all-targets -- --deny warnings`). For a locked check across all features, run `cargo clippy --locked --all-targets --all-features -- --deny warnings`.
 
 ## hi-lite dependency
 
-Cargo resolves `laputa-hi-lite = "0.2"` from crates.io. Changes in the adjacent [hi-lite repository](https://github.com/laputa-systems/hi-lite) do not affect this app until a compatible version is published and the dependency is updated. For local work, apply a Cargo `[patch.crates-io]` override pointing `laputa-hi-lite` at the checkout; its package version must satisfy `Cargo.toml`.
+Cargo resolves dependencies including `laputa-hi-lite = "0.2"` through the `stuff` registry replacing crates.io in `.cargo/config.toml`. Changes in the adjacent [hi-lite repository](https://github.com/laputa-systems/hi-lite) do not affect this app until a compatible version is published and the dependency is updated. For local work, apply a Cargo `[patch.crates-io]` override pointing `laputa-hi-lite` at the checkout; its package version must satisfy `Cargo.toml`.
 
 ## Release workflow
 
