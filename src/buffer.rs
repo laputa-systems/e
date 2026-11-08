@@ -134,7 +134,10 @@ impl GapBuffer {
         if self.gap_len() >= needed {
             return;
         }
-        let extra = needed.max(MIN_GAP);
+        let extra = needed
+            .max(MIN_GAP)
+            .max(self.storage.len() / 32)
+            .min(64 * 1024);
         let old_gap_end = self.gap_end;
         let tail = self.storage.len() - old_gap_end;
         self.storage.resize(self.storage.len() + extra, 0);

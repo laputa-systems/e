@@ -902,14 +902,10 @@ impl Renderer {
                 .nth(left_chars)
                 .map_or(status_left.len(), |(i, _)| i);
             let padding = width.saturating_sub(left_chars + right_len);
-            write!(
-                rb,
-                "{}{}{}",
-                &status_left[..left_byte_end],
-                " ".repeat(padding),
-                status_right,
-            )?;
-            write!(rb, "{RESET}")?;
+            rb.extend_from_slice(&status_left.as_bytes()[..left_byte_end]);
+            rb.resize(rb.len() + padding, b' ');
+            rb.extend_from_slice(status_right.as_bytes());
+            rb.extend_from_slice(RESET.as_bytes());
         }
         if full || self.prev_rows[status_idx] != self.row_buf {
             write!(w, "\x1b[{};1H", status_idx + 1)?;
