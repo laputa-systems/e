@@ -1,4 +1,4 @@
-//! Wall-time benchmarks for editor hot paths.
+//! Wall-time and allocation benchmarks for real-world editor workflows.
 
 #[cfg(target_os = "linux")]
 use std::ffi::CStr;
@@ -16,10 +16,10 @@ static ALLOC: AllocProfiler = AllocProfiler::system();
 use e::buffer::GapBuffer;
 use e::command::CommandRegistry;
 use e::command_buffer::{CommandBuffer, CommandBufferMode, CommandBufferResult};
-use e::document::Document;
+use e::document::{Document, TextEdit};
 use e::find::FindState;
 use e::render::Renderer;
-use e::selection::{Selection, TextPosition};
+use e::selection::{CaretSet, Selection, TextPosition};
 use e::viewport::Viewport;
 use hi_lite::Language;
 
@@ -84,375 +84,54 @@ impl Drop for BenchDir {
     }
 }
 
-fn make_rust_source(n: usize) -> Vec<u8> {
-    let mut buffer = Vec::with_capacity(n * 40);
-    for i in 0..n {
-        match i % 5 {
-            0 => buffer.extend_from_slice(b"    fn example_function(x: usize) -> bool {\n"),
-            1 => buffer.extend_from_slice(b"        let result = x * 2 + 1; // compute\n"),
-            2 => buffer.extend_from_slice(b"        if result > 100 { return false; }\n"),
-            3 => buffer.extend_from_slice(b"        println!(\"value: {}\", result);\n"),
-            _ => buffer.extend_from_slice(b"    }\n"),
-        }
-    }
-    buffer
-}
+// ── Realistic Fixtures ─────────────────────────────────────────────────────────
 
-fn append_python_line(buffer: &mut Vec<u8>, index: usize) {
-    match index % 5 {
-        0 => buffer.extend_from_slice(
-            format!(
-                "benchmark_token_{index:05}: dict[str, int | bool] = {{\"value\": {index}, \"scaled\": {index} * 3, \"even\": {index} % 2 == 0}}\n"
-            )
-            .as_bytes(),
-        ),
-        1 => buffer.extend_from_slice(
-            format!(
-                "benchmark_token_{index:05}_list = [value * 2 for value in range({}) if value >= 0]\n",
-                index % 7
-            )
-            .as_bytes(),
-        ),
-        2 => buffer.extend_from_slice(
-            format!(
-                "benchmark_token_{index:05}_name = f\"item-{{{index}:05d}}-{{{}}}\"\n",
-                index % 3
-            )
-            .as_bytes(),
-        ),
-        3 => buffer.extend_from_slice(
-            format!(
-                "benchmark_token_{index:05}_result = ({} * 2 if {} % 2 == 0 else {} + 1)\n",
-                index, index, index
-            )
-            .as_bytes(),
-        ),
-        _ => buffer.extend_from_slice(
-            format!(
-                "benchmark_token_{index:05}_call = sorted({{value: value * value for value in range({})}}.items(), key=lambda pair: pair[1])\n",
-                index % 5
-            )
-            .as_bytes(),
-        ),
-    }
-}
+/// 4,700+ lines of genuine Rust source code from `e` itself.
+const REAL_RUST_SOURCE: &str = concat!(
+    include_str!("../src/editor.rs"),
+    include_str!("../src/render.rs"),
+    include_str!("../src/buffer.rs"),
+);
 
-fn make_python_source(lines: usize) -> Vec<u8> {
-    let mut buffer = Vec::with_capacity(lines * 128);
-    for index in 0..lines {
-        append_python_line(&mut buffer, index);
-    }
-    buffer
-}
+/// Generate realistic Python code with varied function definitions, type hints,
+/// docstrings, decorators, control flow, and nested collections.
+fn append_realistic_python_block(buffer: &mut Vec<u8>, block_id: usize) {
+    use std::io::Write;
+    let _ = write!(
+        buffer,
+        r#"
+@dataclass
+class ServiceWorkerHandler_{block_id}:
+    """Handles event dispatch and lifecycle management for worker instance {block_id}."""
+    worker_id: str = "worker-{block_id:04x}"
+    concurrency: int = 16
+    metrics: dict[str, float] = field(default_factory=dict)
 
-fn make_python_source_bytes(target: usize) -> Vec<u8> {
-    let mut buffer = Vec::with_capacity(target);
-    let mut index = 0;
-    while buffer.len() < target {
-        append_python_line(&mut buffer, index);
-        index += 1;
-    }
-    buffer
-}
-
-#[rustybench::bench]
-fn file_read_1000_lines(bencher: Bencher) {
-    let dir = BenchDir::new("read");
-    let path = dir.0.join("fixture.rs");
-    let data = make_rust_source(1_000);
-    fs::write(&path, &data).unwrap();
-    bench_with_syscall_trace(bencher, || black_box(e::file_io::read_file(&path).unwrap()));
-}
-
-#[rustybench::bench]
-fn file_write_1000_lines(bencher: Bencher) {
-    let dir = BenchDir::new("write");
-    let path = dir.0.join("fixture.rs");
-    let data = make_rust_source(1_000);
-    bench_with_syscall_trace(bencher, || {
-        let cleaned = e::file_io::clean_for_write(&data);
-        e::file_io::write_file(&path, &cleaned, e::file_io::file_modification_time(&path))
-            .unwrap();
-        black_box(())
-    });
-}
-
-#[rustybench::bench]
-fn document_insert_10_seal_undo_all(b: Bencher) {
-    let data = make_rust_source(500);
-    bench_with_syscall_trace(b, || {
-        let mut document = Document::new(black_box(&data).clone(), None);
-        for i in 0..10 {
-            let line = i % document.buffer.line_count();
-            document.insert(line, 0, b"// ");
-            document.seal_undo();
-        }
-        while document.undo().is_some() {}
-        black_box(&document);
-    });
-}
-
-#[rustybench::bench]
-fn document_insert_delete_interleaved(b: Bencher) {
-    let data = make_rust_source(500);
-    bench_with_syscall_trace(b, || {
-        let mut document = Document::new(black_box(&data).clone(), None);
-        for _ in 0..5 {
-            let line = document.buffer.line_count() / 2;
-            let pos = document.insert(line, 0, b"new line\n");
-            document.seal_undo();
-            document.delete_range(TextPosition::new(pos.line, 0), pos);
-            document.seal_undo();
-        }
-        black_box(&document);
-    });
-}
-
-#[rustybench::bench]
-fn edit_and_render_python_10k(b: Bencher) {
-    let data = make_python_source(10_000);
-    let rules = Some(Language::Python);
-    let mut document = Document::new(data, Some("fixture.py".to_string()));
-    let mut renderer = Renderer::new();
-    renderer.set_language(rules);
-    let mut viewport = Viewport::new(120, 40);
-    let cursor = TextPosition::new(5_000, 12);
-    viewport.scroll_line = cursor.line;
-    let mut sink = Vec::with_capacity(32 * 1024);
-    render_viewport(
-        &mut renderer,
-        &mut document.buffer,
-        &viewport,
-        cursor,
-        None,
-        &mut sink,
+    def process_envelope(self, payload: dict[str, Any], priority: int = 0) -> bool:
+        if priority < 0 or not payload.get("active", True):
+            logger.warning("Dropping inactive or negative-priority envelope {block_id}")
+            return False
+        transformed = [
+            (k, v * 1.5 if isinstance(v, (int, float)) else str(v))
+            for k, v in payload.items()
+            if not k.startswith("_")
+        ]
+        self.metrics["last_transformed_count"] = float(len(transformed))
+        return len(transformed) > 0
+"#
     );
-
-    bench_with_syscall_trace(b, || {
-        let after = document.insert(cursor.line, cursor.column, b"x");
-        render_viewport(
-            &mut renderer,
-            &mut document.buffer,
-            &viewport,
-            after,
-            None,
-            &mut sink,
-        );
-        document.undo();
-        black_box((after, sink.len()));
-    });
 }
 
-#[rustybench::bench]
-fn edit_and_render_python_short(b: Bencher) {
-    let data = make_python_source(40);
-    let rules = Some(Language::Python);
-    let mut document = Document::new(data, Some("fixture.py".to_string()));
-    let mut renderer = Renderer::new();
-    renderer.set_language(rules);
-    let viewport = Viewport::new(120, 40);
-    let cursor = TextPosition::new(5, 12);
-    let mut sink = Vec::with_capacity(32 * 1024);
-    render_viewport(
-        &mut renderer,
-        &mut document.buffer,
-        &viewport,
-        cursor,
-        None,
-        &mut sink,
-    );
-
-    bench_with_syscall_trace(b, || {
-        let after = document.insert(cursor.line, cursor.column, b"x");
-        render_viewport(
-            &mut renderer,
-            &mut document.buffer,
-            &viewport,
-            after,
-            None,
-            &mut sink,
-        );
-        document.undo();
-        black_box((after, sink.len()));
-    });
-}
-
-#[rustybench::bench]
-fn find_update_python_10k(b: Bencher) {
-    let buffer = GapBuffer::from_bytes(make_python_source(10_000));
-    let mut viewport = Viewport::new(120, 40);
-    viewport.scroll_line = 5_000;
-    let mut find = FindState::new();
-    bench_with_syscall_trace(b, || {
-        find.update_highlights_lazy(r"benchmark_token_\d+", black_box(&buffer), black_box(&viewport));
-        black_box((find.total_count, find.matches.len()));
-    });
-}
-
-#[rustybench::bench]
-fn find_refresh_viewport_cached_python_10k(b: Bencher) {
-    let buffer = GapBuffer::from_bytes(make_python_source(10_000));
-    let viewport = Viewport::new(120, 40);
-    let mut find = FindState::new();
-    find.update_highlights_lazy(r"benchmark_token_\d+", &buffer, &viewport);
-    bench_with_syscall_trace(b, || {
-        find.refresh_viewport_matches(black_box(&buffer), black_box(&viewport));
-        black_box(find.matches.len());
-    });
-}
-
-#[rustybench::bench]
-fn find_refresh_viewport_invalidated_python_10k(b: Bencher) {
-    let buffer = GapBuffer::from_bytes(make_python_source(10_000));
-    let mut viewport = Viewport::new(120, 40);
-    let mut find = FindState::new();
-    find.update_highlights_lazy(r"benchmark_token_\d+", &buffer, &viewport);
-    bench_with_syscall_trace(b, || {
-        viewport.scroll_line = black_box(if viewport.scroll_line == 0 { 1 } else { 0 });
-        find.refresh_viewport_matches(black_box(&buffer), black_box(&viewport));
-        black_box(find.matches.len());
-    });
-}
-
-#[rustybench::bench]
-fn paste_multiline_python_100k_into_10k(b: Bencher) {
-    let mut document = Document::new(make_python_source(10_000), Some("fixture.py".to_string()));
-    let paste = make_python_source_bytes(100 * 1024);
-    let cursor = TextPosition::new(5_000, 12);
-    bench_with_syscall_trace(b, || {
-        let after = document.insert(cursor.line, cursor.column, black_box(&paste));
-        document.undo();
-        black_box(after);
-    });
-}
-
-#[rustybench::bench]
-fn replace_all_python_10k(b: Bencher) {
-    let data = make_python_source(10_000);
-    let pattern = regex_lite::Regex::new(r"benchmark_token_\d+").unwrap();
-    bench_with_syscall_trace(b, || {
-        let mut document = Document::new(black_box(&data).clone(), Some("fixture.py".to_string()));
-        let last_line = document.buffer.line_count().saturating_sub(1);
-        let end = TextPosition::new(last_line, document.buffer.line_character_count(last_line));
-        let text_bytes = document.text_in_range(TextPosition::zero(), end);
-        let text = String::from_utf8_lossy(&text_bytes);
-        let count = pattern.find_iter(&text).count();
-        let replacement = pattern.replace_all(&text, "replacement_token").into_owned();
-        document.seal_undo();
-        document.replace_range_with_deleted(
-            TextPosition::zero(),
-            end,
-            replacement.as_bytes(),
-            text_bytes,
-        );
-        document.seal_undo();
-        black_box((count, document.buffer.len()));
-    });
-}
-
-macro_rules! search_benchmarks {
-    ($forward:ident, $backward:ident, $size:literal) => {
-        #[rustybench::bench]
-        fn $forward(b: Bencher) {
-            let data = make_rust_source($size);
-            let buffer = GapBuffer::from_bytes(data.clone());
-            let re = regex_lite::Regex::new("ZZNOTFOUND").unwrap();
-            bench_with_syscall_trace(b, || {
-                black_box(FindState::search_forward(
-                    black_box(&buffer),
-                    &re,
-                    TextPosition::zero(),
-                ))
-            });
-        }
-
-        #[rustybench::bench]
-        fn $backward(b: Bencher) {
-            let data = make_rust_source($size);
-            let buffer = GapBuffer::from_bytes(data.clone());
-            let re = regex_lite::Regex::new("ZZNOTFOUND").unwrap();
-            let last = TextPosition::new(buffer.line_count().saturating_sub(1), 0);
-            bench_with_syscall_trace(b, || {
-                black_box(FindState::search_backward(black_box(&buffer), &re, last))
-            });
-        }
-    };
-}
-
-search_benchmarks!(search_forward_miss_1000, search_backward_miss_1000, 1000);
-
-#[rustybench::bench]
-fn viewport_ensure_cursor_visible_jump(b: Bencher) {
-    let buffer = GapBuffer::from_bytes(make_rust_source(1_000));
-    bench_with_syscall_trace(b, || {
-        let buffer = black_box(&buffer);
-        let mut viewport = Viewport::new(120, 40);
-        let mut widths = |line: usize| buffer.display_column_at(line, usize::MAX);
-        for line in (0..buffer.line_count()).step_by(10) {
-            viewport.ensure_cursor_visible(line, 0, 5, &mut widths);
-        }
-        black_box(&viewport);
-    });
-}
-
-#[rustybench::bench]
-fn viewport_resize_unanchored_100k(b: Bencher) {
-    // Resizing without an anchor only changes dimensions; the work worth
-    // measuring is re-establishing the cursor's visibility afterwards.
-    let mut viewport = Viewport::new(120, 40);
-    viewport.scroll_line = 50_000;
-    let mut widths = |_line: usize| 240;
-    bench_with_syscall_trace(b, || {
-        viewport.width = black_box(if viewport.width == 120 { 80 } else { 120 });
-        viewport.height = black_box(if viewport.height == 40 { 30 } else { 40 });
-        viewport.ensure_cursor_visible(black_box(50_010), 0, 6, &mut widths);
-        black_box((viewport.scroll_line, viewport.scroll_wrap));
-    });
-}
-
-#[rustybench::bench]
-fn viewport_resize_anchored_100k(b: Bencher) {
-    let mut viewport = Viewport::new(120, 40);
-    viewport.scroll_line = 50_000;
-    let line_count = 100_000;
-    let gutter = 6;
-    let mut widths = |_line: usize| 240;
-    bench_with_syscall_trace(b, || {
-        let anchor = viewport.center_anchor(black_box(line_count), gutter, &mut widths);
-        viewport.width = black_box(if viewport.width == 120 { 80 } else { 120 });
-        viewport.height = black_box(if viewport.height == 40 { 30 } else { 40 });
-        if let Some(anchor) = anchor {
-            viewport.center_on_anchor(anchor, line_count, gutter, &mut widths);
-        }
-        black_box((viewport.scroll_line, viewport.scroll_wrap));
-    });
-}
-
-fn render_setup(
-    data: &[u8],
-    width: u16,
-    height: u16,
-    language: Option<Language>,
-) -> (Renderer, GapBuffer, Viewport) {
-    let mut renderer = Renderer::new();
-    renderer.set_language(language);
-    let buffer = GapBuffer::from_bytes(data.to_vec());
-    let mut viewport = Viewport::new(width, height);
-    viewport.scroll_line = buffer.line_count() / 2;
-    (renderer, buffer, viewport)
-}
-
-fn render_viewport(
-    renderer: &mut Renderer,
-    buffer: &mut GapBuffer,
-    viewport: &Viewport,
-    cursor: TextPosition,
-    selection: Option<Selection>,
-    sink: &mut Vec<u8>,
-) {
-    render_editor_frame(
-        renderer, buffer, viewport, cursor, selection, None, None, None, false, sink,
-    );
+fn make_realistic_python_bytes(target_bytes: usize) -> Vec<u8> {
+    let mut buffer = Vec::with_capacity(target_bytes);
+    buffer.extend_from_slice(b"from __future__ import annotations\nimport logging\nfrom dataclasses import dataclass, field\nfrom typing import Any\n\nlogger = logging.getLogger(__name__)\n");
+    let mut block = 0;
+    while buffer.len() < target_bytes {
+        append_realistic_python_block(&mut buffer, block);
+        block += 1;
+    }
+    buffer.truncate(target_bytes);
+    buffer
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -477,7 +156,7 @@ fn render_editor_frame(
             cursor.line,
             cursor.column,
             true,
-            " fixture.py",
+            " main.rs",
             " e v0.1.13 ",
             command_line,
             selection,
@@ -493,68 +172,514 @@ fn render_editor_frame(
         .unwrap();
 }
 
-#[rustybench::bench]
-fn command_palette_trace_python_10k(b: Bencher) {
-    let data = make_python_source(10_000);
-    let mut document = Document::new(data, Some("fixture.py".to_string()));
-    let mut renderer = Renderer::new();
-    renderer.set_language(Some(Language::Python));
-    let viewport = Viewport::new(120, 40);
-    let cursor = TextPosition::new(5_000, 12);
-    let mut command = CommandBuffer::new();
-    let registry = CommandRegistry::new();
-    let mut sink = Vec::with_capacity(32 * 1024);
+// ── 1. File I/O & Load Workflows ──────────────────────────────────────────────
 
-    bench_with_syscall_trace(b, || {
-        command.open(CommandBufferMode::Command, "> ", "");
-        for ch in "goto 5000".chars() {
-            let result = command.handle_key(e::input::Key::Char(ch));
-            if matches!(result, CommandBufferResult::Changed(_)) {
-                let line = command.display_line();
-                render_editor_frame(
-                    &mut renderer,
-                    &mut document.buffer,
-                    &viewport,
-                    cursor,
-                    None,
-                    Some(&line),
-                    None,
-                    None,
-                    false,
-                    &mut sink,
-                );
-            }
-        }
-        let result = command.handle_key(e::input::Key::Char('\n'));
-        if let CommandBufferResult::Submit(input) = result {
-            let action = registry.execute(&input);
-            command.close();
-            render_editor_frame(
-                &mut renderer,
-                &mut document.buffer,
-                &viewport,
-                cursor,
-                None,
-                None,
-                None,
-                None,
-                false,
-                &mut sink,
-            );
-            black_box(action);
-        }
-        black_box((&command, &sink));
+#[rustybench::bench]
+fn file_read_real_rust_source_160kb(bencher: Bencher) {
+    let dir = BenchDir::new("read-rust");
+    let path = dir.0.join("source.rs");
+    fs::write(&path, REAL_RUST_SOURCE.as_bytes()).unwrap();
+    bench_with_syscall_trace(bencher, || {
+        black_box(e::file_io::read_file(&path).unwrap())
     });
 }
 
 #[rustybench::bench]
-fn find_command_trace_python_10k(b: Bencher) {
-    let data = make_python_source(10_000);
-    let mut document = Document::new(data, Some("fixture.py".to_string()));
+fn file_write_real_rust_source_160kb(bencher: Bencher) {
+    let dir = BenchDir::new("write-rust");
+    let path = dir.0.join("source.rs");
+    let data = REAL_RUST_SOURCE.as_bytes();
+    bench_with_syscall_trace(bencher, || {
+        let cleaned = e::file_io::clean_for_write(data);
+        e::file_io::write_file(&path, &cleaned, e::file_io::file_modification_time(&path))
+            .unwrap();
+        black_box(())
+    });
+}
+
+#[rustybench::bench]
+fn open_and_render_real_rust_source_4k_lines(bencher: Bencher) {
+    let dir = BenchDir::new("open-rust");
+    let path = dir.0.join("source.rs");
+    fs::write(&path, REAL_RUST_SOURCE.as_bytes()).unwrap();
+    let rules = Some(Language::Rust);
+
+    bench_with_syscall_trace(bencher, || {
+        let loaded = e::file_io::read_file(&path).unwrap();
+        let mut buffer = GapBuffer::from_bytes(loaded);
+        let mut renderer = Renderer::new();
+        renderer.set_language(rules);
+        let mut viewport = Viewport::new(120, 40);
+        viewport.scroll_line = buffer.line_count() / 3;
+        let cursor = TextPosition::new(viewport.scroll_line, 4);
+        let mut sink = Vec::with_capacity(32 * 1024);
+        render_editor_frame(
+            &mut renderer,
+            &mut buffer,
+            &viewport,
+            cursor,
+            None,
+            None,
+            None,
+            None,
+            false,
+            &mut sink,
+        );
+        black_box(sink.len())
+    });
+}
+
+#[rustybench::bench]
+fn open_and_render_python_1mb(bencher: Bencher) {
+    let dir = BenchDir::new("open-1mb");
+    let path = dir.0.join("service.py");
+    let data = make_realistic_python_bytes(1024 * 1024);
+    fs::write(&path, &data).unwrap();
+    let rules = Some(Language::Python);
+
+    bench_with_syscall_trace(bencher, || {
+        let loaded = e::file_io::read_file(&path).unwrap();
+        let mut buffer = GapBuffer::from_bytes(loaded);
+        let mut renderer = Renderer::new();
+        renderer.set_language(rules);
+        let mut viewport = Viewport::new(120, 40);
+        viewport.scroll_line = buffer.line_count() / 2;
+        let cursor = TextPosition::new(viewport.scroll_line, 0);
+        let mut sink = Vec::with_capacity(32 * 1024);
+        render_editor_frame(
+            &mut renderer,
+            &mut buffer,
+            &viewport,
+            cursor,
+            None,
+            None,
+            None,
+            None,
+            false,
+            &mut sink,
+        );
+        black_box(sink.len())
+    });
+}
+
+#[rustybench::bench]
+fn open_and_render_python_10mb(bencher: Bencher) {
+    let dir = BenchDir::new("open-10mb");
+    let path = dir.0.join("large_service.py");
+    let data = make_realistic_python_bytes(10 * 1024 * 1024);
+    fs::write(&path, &data).unwrap();
+    let rules = Some(Language::Python);
+
+    bench_with_syscall_trace(bencher, || {
+        let loaded = e::file_io::read_file(&path).unwrap();
+        let mut buffer = GapBuffer::from_bytes(loaded);
+        let mut renderer = Renderer::new();
+        renderer.set_language(rules);
+        let mut viewport = Viewport::new(120, 40);
+        viewport.scroll_line = buffer.line_count() / 2;
+        let cursor = TextPosition::new(viewport.scroll_line, 0);
+        let mut sink = Vec::with_capacity(32 * 1024);
+        render_editor_frame(
+            &mut renderer,
+            &mut buffer,
+            &viewport,
+            cursor,
+            None,
+            None,
+            None,
+            None,
+            false,
+            &mut sink,
+        );
+        black_box(sink.len())
+    });
+}
+
+// ── 2. Interactive Editing Workflows ──────────────────────────────────────────
+
+#[rustybench::bench]
+fn interactive_typing_render_real_rust(b: Bencher) {
+    let data = REAL_RUST_SOURCE.as_bytes().to_vec();
+    let rules = Some(Language::Rust);
+    let mut document = Document::new(data, Some("source.rs".to_string()));
     let mut renderer = Renderer::new();
-    renderer.set_language(Some(Language::Python));
+    renderer.set_language(rules);
+    let mut viewport = Viewport::new(120, 40);
+    let cursor = TextPosition::new(1_200, 16);
+    viewport.scroll_line = cursor.line;
+    let mut sink = Vec::with_capacity(32 * 1024);
+
+    // Warm up highlighter cache across the file down to viewport
+    render_editor_frame(
+        &mut renderer,
+        &mut document.buffer,
+        &viewport,
+        cursor,
+        None,
+        None,
+        None,
+        None,
+        false,
+        &mut sink,
+    );
+
+    bench_with_syscall_trace(b, || {
+        let after = document.insert(cursor.line, cursor.column, b"let x = 42; ");
+        render_editor_frame(
+            &mut renderer,
+            &mut document.buffer,
+            &viewport,
+            after,
+            None,
+            None,
+            None,
+            None,
+            false,
+            &mut sink,
+        );
+        document.undo();
+        black_box((after, sink.len()));
+    });
+}
+
+#[rustybench::bench]
+fn interactive_newline_indent_split_rust(b: Bencher) {
+    let data = REAL_RUST_SOURCE.as_bytes().to_vec();
+    let rules = Some(Language::Rust);
+    let mut document = Document::new(data, Some("source.rs".to_string()));
+    let mut renderer = Renderer::new();
+    renderer.set_language(rules);
+    let mut viewport = Viewport::new(120, 40);
+    let cursor = TextPosition::new(1_200, 4);
+    viewport.scroll_line = cursor.line;
+    let mut sink = Vec::with_capacity(32 * 1024);
+
+    render_editor_frame(
+        &mut renderer,
+        &mut document.buffer,
+        &viewport,
+        cursor,
+        None,
+        None,
+        None,
+        None,
+        false,
+        &mut sink,
+    );
+
+    bench_with_syscall_trace(b, || {
+        let after = document.insert(cursor.line, cursor.column, b"\n        ");
+        render_editor_frame(
+            &mut renderer,
+            &mut document.buffer,
+            &viewport,
+            after,
+            None,
+            None,
+            None,
+            None,
+            false,
+            &mut sink,
+        );
+        document.undo();
+        black_box(after);
+    });
+}
+
+#[rustybench::bench]
+fn interactive_multicursor_typing_20_carets(b: Bencher) {
+    let data = REAL_RUST_SOURCE.as_bytes().to_vec();
+    let mut document = Document::new(data, Some("source.rs".to_string()));
+    let mut carets = CaretSet::new(TextPosition::new(1_000, 4));
+    for i in 1..20 {
+        carets.add_caret(TextPosition::new(1_000 + i * 10, 4));
+    }
+    let before_snapshot = carets.snapshot();
+
+    bench_with_syscall_trace(b, || {
+        let edits: Vec<TextEdit> = before_snapshot
+            .selections
+            .iter()
+            .map(|selection| {
+                let offset = document
+                    .buffer
+                    .position_to_byte_offset(selection.cursor.line, selection.cursor.column);
+                TextEdit {
+                    start_byte: offset,
+                    end_byte: offset,
+                    inserted_bytes: b"// NOTE: ".to_vec(),
+                    deleted_bytes: Vec::new(),
+                }
+            })
+            .collect();
+        let target_offsets: Vec<(usize, usize)> = edits
+            .iter()
+            .map(|e| (e.start_byte + 9, e.start_byte + 9))
+            .collect();
+        let after = document.apply_batch(&edits, &before_snapshot, &target_offsets, 0);
+        document.undo();
+        black_box(after);
+    });
+}
+
+#[rustybench::bench]
+fn paste_multiline_real_rust_100k(b: Bencher) {
+    let mut document = Document::new(
+        REAL_RUST_SOURCE.as_bytes().to_vec(),
+        Some("source.rs".to_string()),
+    );
+    let paste_bytes = &REAL_RUST_SOURCE.as_bytes()[..100 * 1024];
+    let cursor = TextPosition::new(2_000, 8);
+
+    bench_with_syscall_trace(b, || {
+        let after = document.insert(cursor.line, cursor.column, black_box(paste_bytes));
+        document.undo();
+        black_box(after);
+    });
+}
+
+#[rustybench::bench]
+fn document_batch_insert_and_full_undo(b: Bencher) {
+    let data = REAL_RUST_SOURCE.as_bytes().to_vec();
+    bench_with_syscall_trace(b, || {
+        let mut document = Document::new(black_box(&data).clone(), None);
+        for i in 0..10 {
+            let line = 500 + i * 20;
+            document.insert(line, 0, b"// audit header\n");
+            document.seal_undo();
+        }
+        while document.undo().is_some() {}
+        black_box(&document);
+    });
+}
+
+// ── 3. Interactive Navigation & Viewport Rendering ────────────────────────────
+
+#[rustybench::bench]
+fn interactive_scroll_rust_continuous(b: Bencher) {
+    let data = REAL_RUST_SOURCE.as_bytes().to_vec();
+    let rules = Some(Language::Rust);
+    let mut renderer = Renderer::new();
+    renderer.set_language(rules);
+    let mut buffer = GapBuffer::from_bytes(data);
+    let mut viewport = Viewport::new(120, 40);
+    viewport.scroll_line = 1_000;
+    let mut sink = Vec::with_capacity(32 * 1024);
+
+    // Initial warm frame
+    render_editor_frame(
+        &mut renderer,
+        &mut buffer,
+        &viewport,
+        TextPosition::new(1_000, 0),
+        None,
+        None,
+        None,
+        None,
+        false,
+        &mut sink,
+    );
+
+    let mut down = true;
+    bench_with_syscall_trace(b, || {
+        if down {
+            viewport.scroll_line += 3;
+        } else {
+            viewport.scroll_line -= 3;
+        }
+        down = !down;
+        let cursor_line = viewport.scroll_line;
+        render_editor_frame(
+            &mut renderer,
+            &mut buffer,
+            &viewport,
+            TextPosition::new(cursor_line, 0),
+            None,
+            None,
+            None,
+            None,
+            false,
+            &mut sink,
+        );
+        black_box(sink.len());
+    });
+}
+
+#[rustybench::bench]
+fn render_full_frame_rust_syntax(b: Bencher) {
+    let data = REAL_RUST_SOURCE.as_bytes().to_vec();
+    let rules = Some(Language::Rust);
+    let mut renderer = Renderer::new();
+    renderer.set_language(rules);
+    let mut buffer = GapBuffer::from_bytes(data);
+    let mut viewport = Viewport::new(120, 40);
+    viewport.scroll_line = 1_500;
+    let mut sink = Vec::with_capacity(32 * 1024);
+
+    bench_with_syscall_trace(b, || {
+        renderer.needs_full_redraw = true;
+        render_editor_frame(
+            &mut renderer,
+            &mut buffer,
+            &viewport,
+            TextPosition::new(1_500, 4),
+            None,
+            None,
+            None,
+            None,
+            false,
+            &mut sink,
+        );
+        black_box(sink.len());
+    });
+}
+
+#[rustybench::bench]
+fn render_full_frame_rust_selection(b: Bencher) {
+    let data = REAL_RUST_SOURCE.as_bytes().to_vec();
+    let rules = Some(Language::Rust);
+    let mut renderer = Renderer::new();
+    renderer.set_language(rules);
+    let mut buffer = GapBuffer::from_bytes(data);
+    let mut viewport = Viewport::new(120, 40);
+    viewport.scroll_line = 1_500;
+    let selection = Selection {
+        anchor: TextPosition::new(1_502, 0),
+        cursor: TextPosition::new(1_518, 20),
+    };
+    let mut sink = Vec::with_capacity(32 * 1024);
+
+    bench_with_syscall_trace(b, || {
+        renderer.needs_full_redraw = true;
+        render_editor_frame(
+            &mut renderer,
+            &mut buffer,
+            &viewport,
+            TextPosition::new(1_518, 20),
+            Some(selection),
+            None,
+            None,
+            None,
+            false,
+            &mut sink,
+        );
+        black_box(sink.len());
+    });
+}
+
+#[rustybench::bench]
+fn render_full_frame_plain(b: Bencher) {
+    let data = REAL_RUST_SOURCE.as_bytes().to_vec();
+    let mut renderer = Renderer::new();
+    renderer.set_language(None);
+    let mut buffer = GapBuffer::from_bytes(data);
+    let mut viewport = Viewport::new(120, 40);
+    viewport.scroll_line = 1_500;
+    let mut sink = Vec::with_capacity(32 * 1024);
+
+    bench_with_syscall_trace(b, || {
+        renderer.needs_full_redraw = true;
+        render_editor_frame(
+            &mut renderer,
+            &mut buffer,
+            &viewport,
+            TextPosition::new(1_500, 4),
+            None,
+            None,
+            None,
+            None,
+            false,
+            &mut sink,
+        );
+        black_box(sink.len());
+    });
+}
+
+#[rustybench::bench]
+fn render_incremental_cursor_move(b: Bencher) {
+    let data = REAL_RUST_SOURCE.as_bytes().to_vec();
+    let rules = Some(Language::Rust);
+    let mut renderer = Renderer::new();
+    renderer.set_language(rules);
+    let mut buffer = GapBuffer::from_bytes(data);
     let viewport = Viewport::new(120, 40);
-    let cursor = TextPosition::new(5_000, 12);
+    let base_line = 1_500;
+    let mut sink = Vec::with_capacity(32 * 1024);
+
+    render_editor_frame(
+        &mut renderer,
+        &mut buffer,
+        &viewport,
+        TextPosition::new(base_line, 0),
+        None,
+        None,
+        None,
+        None,
+        false,
+        &mut sink,
+    );
+
+    let mut step = true;
+    bench_with_syscall_trace(b, || {
+        let line = if step { base_line + 1 } else { base_line };
+        step = !step;
+        render_editor_frame(
+            &mut renderer,
+            &mut buffer,
+            &viewport,
+            TextPosition::new(line, 4),
+            None,
+            None,
+            None,
+            None,
+            false,
+            &mut sink,
+        );
+        black_box(sink.len());
+    });
+}
+
+// ── 4. Search & Replace Workflows ─────────────────────────────────────────────
+
+#[rustybench::bench]
+fn search_interactive_forward_real_rust(b: Bencher) {
+    let buffer = GapBuffer::from_bytes(REAL_RUST_SOURCE.as_bytes().to_vec());
+    let re = regex_lite::Regex::new(r"TextPosition").unwrap();
+    let start = TextPosition::new(500, 0);
+
+    bench_with_syscall_trace(b, || {
+        black_box(FindState::search_forward(
+            black_box(&buffer),
+            &re,
+            start,
+        ))
+    });
+}
+
+#[rustybench::bench]
+fn search_regex_scan_real_rust(b: Bencher) {
+    let buffer = GapBuffer::from_bytes(REAL_RUST_SOURCE.as_bytes().to_vec());
+    let re = regex_lite::Regex::new(r"fn\s+[a-z_][a-z0-9_]*\s*\(").unwrap();
+
+    bench_with_syscall_trace(b, || {
+        black_box(FindState::search_forward(
+            black_box(&buffer),
+            &re,
+            TextPosition::zero(),
+        ))
+    });
+}
+
+#[rustybench::bench]
+fn find_command_palette_trace_real_rust(b: Bencher) {
+    let mut document = Document::new(
+        REAL_RUST_SOURCE.as_bytes().to_vec(),
+        Some("source.rs".to_string()),
+    );
+    let mut renderer = Renderer::new();
+    renderer.set_language(Some(Language::Rust));
+    let viewport = Viewport::new(120, 40);
+    let cursor = TextPosition::new(1_000, 4);
     let mut command = CommandBuffer::new();
     let mut find = FindState::new();
     let mut sink = Vec::with_capacity(32 * 1024);
@@ -562,7 +687,7 @@ fn find_command_trace_python_10k(b: Bencher) {
     bench_with_syscall_trace(b, || {
         command.open(CommandBufferMode::Find, "find: ", "");
         find.clear();
-        for ch in "benchmark_token_123".chars() {
+        for ch in "TextPosition".chars() {
             let result = command.handle_key(e::input::Key::Char(ch));
             if let CommandBufferResult::Changed(pattern) = result {
                 find.update_highlights_lazy(&pattern, &document.buffer, &viewport);
@@ -599,241 +724,87 @@ fn find_command_trace_python_10k(b: Bencher) {
     });
 }
 
-fn render_frame(
-    b: Bencher,
-    data: &[u8],
-    width: u16,
-    height: u16,
-    selection: Option<Selection>,
-    language: Option<Language>,
-) {
-    let (mut renderer, mut buffer, viewport) = render_setup(data, width, height, language);
-    let cursor_line = viewport.scroll_line;
-    let mut sink = Vec::with_capacity(32 * 1024);
+#[rustybench::bench]
+fn replace_all_real_rust(b: Bencher) {
+    let data = REAL_RUST_SOURCE.as_bytes().to_vec();
+    let pattern = regex_lite::Regex::new(r"\bTextPosition\b").unwrap();
+
     bench_with_syscall_trace(b, || {
-        renderer.needs_full_redraw = true;
-        render_viewport(
-            &mut renderer,
-            &mut buffer,
-            &viewport,
-            TextPosition::new(cursor_line, 0),
-            selection,
-            &mut sink,
+        let mut document = Document::new(black_box(&data).clone(), Some("source.rs".to_string()));
+        let last_line = document.buffer.line_count().saturating_sub(1);
+        let end = TextPosition::new(last_line, document.buffer.line_character_count(last_line));
+        let text_bytes = document.text_in_range(TextPosition::zero(), end);
+        let text = String::from_utf8_lossy(&text_bytes);
+        let count = pattern.find_iter(&text).count();
+        let replacement = pattern.replace_all(&text, "PositionCoord").into_owned();
+        document.seal_undo();
+        document.replace_range_with_deleted(
+            TextPosition::zero(),
+            end,
+            replacement.as_bytes(),
+            text_bytes,
         );
-        black_box(&sink);
+        document.seal_undo();
+        black_box((count, document.buffer.len()));
     });
 }
 
-fn open_and_render_python(b: Bencher, data: &[u8], label: &str) {
-    let dir = BenchDir::new(label);
-    let path = dir.0.join("fixture.py");
-    fs::write(&path, data).unwrap();
-    let rules = Some(Language::Python);
-    bench_with_syscall_trace(b, || {
-        let loaded = e::file_io::read_file(&path).unwrap();
-        let mut buffer = GapBuffer::from_bytes(loaded);
-        let mut renderer = Renderer::new();
-        renderer.set_language(rules);
-        let mut viewport = Viewport::new(120, 40);
-        viewport.scroll_line = buffer.line_count() / 2;
-        let cursor = TextPosition::new(viewport.scroll_line, 0);
-        let mut sink = Vec::with_capacity(32 * 1024);
-        render_viewport(
-            &mut renderer,
-            &mut buffer,
-            &viewport,
-            cursor,
-            None,
-            &mut sink,
-        );
-        black_box(sink.len());
-    });
-}
+// ── 5. Command Palette Workflow ───────────────────────────────────────────────
 
 #[rustybench::bench]
-fn open_and_render_python_1mb(b: Bencher) {
-    let data = make_python_source_bytes(1024 * 1024);
-    open_and_render_python(b, &data, "open-1mb");
-}
-
-#[rustybench::bench]
-fn open_and_render_python_10mb(b: Bencher) {
-    let data = make_python_source_bytes(10 * 1024 * 1024);
-    open_and_render_python(b, &data, "open-10mb");
-}
-
-#[rustybench::bench]
-fn render_frame_120x40_viewport_syntax(b: Bencher) {
-    let data = make_rust_source(1_000);
-    let rules = Some(Language::Rust);
-    render_frame(b, &data, 120, 40, None, rules);
-}
-
-#[rustybench::bench]
-fn render_frame_120x40_viewport_selection(b: Bencher) {
-    let data = make_rust_source(1_000);
-    let rules = Some(Language::Rust);
-    let line = 1_000 / 2;
-    let selection = Selection {
-        anchor: TextPosition::new(line, 0),
-        cursor: TextPosition::new(line + 5, 10),
-    };
-    render_frame(b, &data, 120, 40, Some(selection), rules);
-}
-
-#[rustybench::bench]
-fn render_frame_120x40_viewport_plain(b: Bencher) {
-    let data = make_rust_source(1_000);
-    render_frame(b, &data, 120, 40, None, None);
-}
-
-fn render_incremental(
-    b: Bencher,
-    mut movement: impl FnMut(&mut Renderer, &mut GapBuffer, &mut Vec<u8>, &Viewport, usize),
-) {
-    let data = make_rust_source(1_000);
-    let rules = Some(Language::Rust);
-    let (mut renderer, mut buffer, viewport) = render_setup(&data, 120, 40, rules);
-    let cursor_line = viewport.scroll_line;
+fn command_palette_goto_trace_real_rust(b: Bencher) {
+    let data = REAL_RUST_SOURCE.as_bytes().to_vec();
+    let mut document = Document::new(data, Some("source.rs".to_string()));
+    let mut renderer = Renderer::new();
+    renderer.set_language(Some(Language::Rust));
+    let mut viewport = Viewport::new(120, 40);
+    let mut cursor = TextPosition::new(200, 4);
+    let mut command = CommandBuffer::new();
+    let registry = CommandRegistry::new();
     let mut sink = Vec::with_capacity(32 * 1024);
-    renderer.needs_full_redraw = true;
-    renderer
-        .render(
-            &mut sink,
-            &mut buffer,
-            &viewport,
-            cursor_line,
-            0,
-            true,
-            " test.rs",
-            " e v0.1.5 ",
-            None,
-            None,
-            &[],
-            &[],
-            None,
-            None,
-            &[],
-            None,
-            false,
-            None,
-        )
-        .unwrap();
+
     bench_with_syscall_trace(b, || {
-        movement(
-            &mut renderer,
-            &mut buffer,
-            &mut sink,
-            &viewport,
-            cursor_line,
-        )
-    });
-}
-
-#[rustybench::bench]
-fn render_incr_noop_120x40(b: Bencher) {
-    render_incremental(b, |renderer, buffer, sink, viewport, cursor_line| {
-        sink.clear();
-        renderer
-            .render(
-                sink,
-                buffer,
-                viewport,
-                cursor_line,
-                0,
-                true,
-                " test.rs",
-                " e v0.1.5 ",
-                None,
-                None,
-                &[],
-                &[],
-                None,
-                None,
-                &[],
-                None,
-                false,
-                None,
-            )
-            .unwrap();
-        black_box(sink);
-    });
-}
-
-#[rustybench::bench]
-fn render_incr_cursor_move_120x40(b: Bencher) {
-    let mut current = None;
-    render_incremental(b, |renderer, buffer, sink, viewport, cursor_line| {
-        let line = current.take().unwrap_or(cursor_line + 1);
-        current = Some(if line == cursor_line {
-            cursor_line + 1
-        } else {
-            cursor_line
-        });
-        sink.clear();
-        renderer
-            .render(
-                sink,
-                buffer,
-                viewport,
-                line,
-                0,
-                true,
-                " test.rs",
-                " e v0.1.5 ",
-                None,
-                None,
-                &[],
-                &[],
-                None,
-                None,
-                &[],
-                None,
-                false,
-                None,
-            )
-            .unwrap();
-        black_box(sink);
-    });
-}
-
-#[rustybench::bench]
-fn render_incr_scroll_120x40(b: Bencher) {
-    let mut down = true;
-    render_incremental(b, |renderer, buffer, sink, viewport, cursor_line| {
-        let mut shifted = viewport.clone();
-        if down {
-            shifted.scroll_line += 3;
+        command.open(CommandBufferMode::Command, "> ", "");
+        for ch in "goto 2500".chars() {
+            let result = command.handle_key(e::input::Key::Char(ch));
+            if matches!(result, CommandBufferResult::Changed(_)) {
+                let line = command.display_line();
+                render_editor_frame(
+                    &mut renderer,
+                    &mut document.buffer,
+                    &viewport,
+                    cursor,
+                    None,
+                    Some(&line),
+                    None,
+                    None,
+                    false,
+                    &mut sink,
+                );
+            }
         }
-        down = !down;
-        sink.clear();
-        renderer
-            .render(
-                sink,
-                buffer,
-                &shifted,
-                if shifted.scroll_line == viewport.scroll_line {
-                    cursor_line
-                } else {
-                    cursor_line + 3
-                },
-                0,
-                true,
-                " test.rs",
-                " e v0.1.5 ",
+        let result = command.handle_key(e::input::Key::Char('\n'));
+        if let CommandBufferResult::Submit(input) = result {
+            if let e::command::CommandAction::Goto(line_1based) = registry.execute(&input) {
+                let target_line = (line_1based.saturating_sub(1)).min(document.buffer.line_count() - 1);
+                viewport.scroll_line = target_line.saturating_sub(15);
+                cursor = TextPosition::new(target_line, 0);
+            }
+            command.close();
+            render_editor_frame(
+                &mut renderer,
+                &mut document.buffer,
+                &viewport,
+                cursor,
                 None,
                 None,
-                &[],
-                &[],
                 None,
-                None,
-                &[],
                 None,
                 false,
-                None,
-            )
-            .unwrap();
-        black_box(sink);
+                &mut sink,
+            );
+        }
+        black_box((&command, &sink));
     });
 }
 
