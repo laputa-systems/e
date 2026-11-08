@@ -86,13 +86,11 @@ fn find_quote_match(
     pos: TextPosition,
     get_line: &mut impl FnMut(usize, &mut Vec<u8>),
     scratch: &mut Vec<u8>,
-    line_count: usize,
 ) -> Option<TextPosition> {
     hi_lite::find_quote_match(
         hi_lite::TextPosition::new(pos.line, pos.column),
         get_line,
         scratch,
-        line_count,
     )
     .map(|position| TextPosition::new(position.line, position.column))
 }
@@ -718,7 +716,6 @@ impl Editor {
             cursor,
             &mut |line_idx, buf| self.document.buffer.line_text_into(line_idx, buf),
             &mut scratch,
-            line_count,
         );
         self.line_text_scratch = scratch;
         match_pos.map(|p| (cursor, p))

@@ -122,9 +122,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "laputa-hi-lite"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4a71cb4bfb47494b9949e0190d9dc98e8424e98f0c329a5c8d2e6268a066e79"
+version = "0.4.0"
 
 [[package]]
 name = "laputa-ptytest"

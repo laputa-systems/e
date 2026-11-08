@@ -6,7 +6,7 @@ The Rust toolchain is pinned in `rust-toolchain.toml`. `make build` runs a devel
 
 ## hi-lite dependency
 
-Cargo resolves dependencies including `laputa-hi-lite = "0.2"` through the `stuff` registry replacing crates.io in `.cargo/config.toml`. Changes in the adjacent [hi-lite repository](https://github.com/laputa-systems/hi-lite) do not affect this app until a compatible version is published and the dependency is updated. For local work, apply a Cargo `[patch.crates-io]` override pointing `laputa-hi-lite` at the checkout; its package version must satisfy `Cargo.toml`.
+Cargo resolves dependencies including `laputa-hi-lite = "0.4"` through the `stuff` registry replacing crates.io in `.cargo/config.toml`. Changes in the adjacent [hi-lite repository](https://github.com/laputa-systems/hi-lite) do not affect this app until a compatible version is published and the dependency is updated. For local work, apply a Cargo `[patch.crates-io]` override pointing `laputa-hi-lite` at the checkout; its package version must satisfy `Cargo.toml`.
 
 ## Release workflow
 
