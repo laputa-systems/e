@@ -1,17 +1,6 @@
 Prefix: EDIT
 Next: 9
 
-### EDIT-6 · P2 · Terminal resize is delayed by up to 500ms and completely blocked during active input
-
-- **Area:** Concurrency
-- **Where:** `src/editor.rs:321-341`, `src/signal.rs:226-228`
-- **Problem:** `Editor::event_loop` only checks `crate::signal::take_sigwinch()` inside the `Err(mpsc::RecvTimeoutError::Timeout)` arm of `rx.recv_timeout(Duration::from_millis(500))`. The SIGWINCH handler sets an atomic flag but does not wake the channel. As a result:
-1. Resizing the terminal while idle does not update the viewport or redraw until the 500ms timeout expires, causing noticeable resize lag.
-2. If input events arrive during or after resize (typing, movement, mouse events), `recv_timeout` returns `Ok(ev)` and `rx.try_recv()` drains the queue. The loop calls `draw(&mut stdout)?` without calling `take_sigwinch()`, repeatedly rendering with stale viewport dimensions until input stops for 500ms.
-- **Recommendation:** Check `crate::signal::take_sigwinch()` and call `resize_view` at the top of the event loop before `self.draw(&mut stdout)?`, as well as immediately after handling events. To eliminate the 500ms idle delay, wake the event loop on SIGWINCH (e.g. by sending a signal event through a channel or pipe).
-- **Fix with:** lifecycle-concurrency
-- **Effort:** S
-
 ### EDIT-7 · P2 · Saving to a dangling symlink unconditionally fails with AlreadyExists
 
 - **Area:** Untrusted input, OS

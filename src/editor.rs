@@ -308,6 +308,12 @@ impl Editor {
                 ));
             }
 
+            if crate::signal::take_sigwinch()
+                && let Ok((w, h)) = input::terminal_size()
+            {
+                self.resize_view(w, h);
+            }
+
             // Expire status messages after 3 seconds
             if let Some(t) = self.status_time
                 && t.elapsed().as_secs() >= 3
@@ -318,7 +324,7 @@ impl Editor {
 
             self.draw(&mut stdout)?;
 
-            match rx.recv_timeout(Duration::from_millis(500)) {
+            match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(ev) => {
                     self.dispatch_event(ev);
                     // Drain all pending events before re-rendering so bursts
@@ -330,13 +336,7 @@ impl Editor {
                         }
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if crate::signal::take_sigwinch()
-                        && let Ok((w, h)) = input::terminal_size()
-                    {
-                        self.resize_view(w, h);
-                    }
-                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
