@@ -13,7 +13,7 @@ regex-lite = "0.1"
 rustix = { version = "=1.1.4", features = ["runtime", "termios"] }
 
 [dev-dependencies]
-rustybench = "0.4"
+rustybench = "0.5"
 laputa-ptytest = "0.4.0"
 quickcheck = { version = "1", default-features = false }
 

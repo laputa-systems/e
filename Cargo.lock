@@ -21,6 +21,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "deser"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d76d6df21374422dad94c9ee880dcb7b7038fa853d8c98677cc6d17b01866945"
+dependencies = [
+ "deser-core",
+ "deser-derive",
+]
+
+[[package]]
+name = "deser-core"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02f55809b557fd7b0edb219ea51b4368ed8bc03794d4850ffc20c7152139e7b0"
+
+[[package]]
+name = "deser-derive"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27b603a9e0a47996eb048e2e3a74cf505c283e94fa9f4bcb6efa9bc7824dd879"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "deser-json"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b2e6b0b2ca4daf985f1de5554bf586290e2eab7f954858cf6a98466e942ba27"
+dependencies = [
+ "deser-core",
+ "itoa",
+ "zmij",
+]
+
+[[package]]
 name = "e"
 version = "0.1.13"
 dependencies = [
@@ -103,28 +141,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "mini-internal"
-version = "0.1.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34dea53b00d87f21b1535cbef93765c75f159dbbfeef16152f0b6b3bf28f3bb6"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "miniserde"
-version = "0.1.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8f82621301d3b99a1542736de96e5df69865b235987d6470b28c7aa670cfeb1"
-dependencies = [
- "itoa",
- "mini-internal",
- "zmij",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -200,21 +216,26 @@ dependencies = [
 
 [[package]]
 name = "rustybench"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a64392032c28cc45d5fe44fe9232b6bf91498c407f1cfcd532ab742b6241712"
+checksum = "51f626af27819f24b653b2487cc713ed0909d98623b34b9ced2f37ef8c940672"
 dependencies = [
+ "deser",
+ "deser-json",
  "lexopt",
- "miniserde",
  "regex-lite",
+ "rustc-hash",
  "rustybench-macros",
 ]
 
 [[package]]
 name = "rustybench-macros"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3dc620959d82483d14afbe317790bc9814aa90df11c91565ead4f3a578883f50"
+checksum = "834b0e27a6f3d0a447981d3a00b2e37e035d7639b6d0afa23fe3d3a9c64e7c31"
+dependencies = [
+ "syn",
+]
 
 [[package]]
 name = "syn"
