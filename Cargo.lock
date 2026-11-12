@@ -57,9 +57,9 @@ dependencies = [
 
 [[package]]
 name = "itoa"
-version = "1.0.18"
+version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "laputa-hi-lite"
@@ -69,11 +69,12 @@ checksum = "cb7da635a27ddd0f54743af0fe595c75a327a61ffa54a309e7d22ab68b89c736"
 
 [[package]]
 name = "laputa-ptytest"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "875cda5453878ab13b71391aaf3cbdb541ecf1f29c3dbb91a99b96a7ef4a0aa0"
+checksum = "ffc9fd2fa31b72e3631804b806e0db9a8046cba191e82d862d9e4c1740eec050"
 dependencies = [
  "libc",
+ "rustc-hash",
  "vt100",
 ]
 
@@ -217,9 +218,9 @@ checksum = "3dc620959d82483d14afbe317790bc9814aa90df11c91565ead4f3a578883f50"
 
 [[package]]
 name = "syn"
-version = "3.0.9"
+version = "3.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
+checksum = "4ae9ccbea3a7b0b09443036490c8f34a8b1b760fd345e5c0dae0aac718faea79"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -240,9 +241,9 @@ checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
 name = "vt100"
-version = "0.16.2"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "054ff75fb8fa83e609e685106df4faeffdf3a735d3c74ebce97ec557d5d36fd9"
+checksum = "eb05cdd19ae8707bf6a0a269972c07e6358103a7079faec749dec318a5b3dc23"
 dependencies = [
  "itoa",
  "unicode-width",
