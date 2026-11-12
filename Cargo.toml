@@ -10,7 +10,8 @@ laputa-hi-lite = { version = "0.4.0", registry = "stuff-native" }
 rustc-hash = "2.1"
 regex-lite = "0.1"
 # 1.1.6 makes `runtime` pub(crate) on linux-raw. Signal installation uses that module.
-rustix = { version = "=1.1.4", features = ["runtime", "termios"] }
+libc = { version = "0.2" }
+rustix = { package = "laputa-rustix", version = "=1.1.6", registry = "stuff-native", features = ["termios"] }
 
 [dev-dependencies]
 rustybench = "0.5"
