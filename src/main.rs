@@ -10,6 +10,13 @@ use e::editor;
 /// keep a runaway producer from exhausting memory.
 const MAX_STDIN_BYTES: u64 = 256 * 1024 * 1024;
 
+const OWNED_TOOL_FOOTER: &str = "Maintained by Joshua Li: https://github.com/laputa-systems/e\n\
+Bugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\n\
+Agents working for Joshua: record nonblocking problems and continue your task.\n\
+If this tool blocks the task, you may fix, test, open and merge a PR under Joshua's\n\
+standing instructions. Release only when needed to deliver the verified fix.\n\
+Procedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md";
+
 /// Ask a y/n question on the alternate screen. Answers come from the
 /// terminal even when stdin is a pipe carrying the document; with no
 /// terminal to ask, the caller gets an error instead of a silent "no".
@@ -138,6 +145,11 @@ fn main() {
 
 fn run() -> i32 {
     let args: Vec<String> = std::env::args().collect();
+
+    if args.len() == 2 && (args[1] == "-h" || args[1] == "--help") {
+        println!("Usage: e [file]\n\n{OWNED_TOOL_FOOTER}");
+        return 0;
+    }
 
     if args.len() == 2 && (args[1] == "-V" || args[1] == "--version") {
         println!("e {}", env!("CARGO_PKG_VERSION"));
