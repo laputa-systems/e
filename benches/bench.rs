@@ -487,7 +487,7 @@ fn interactive_scroll_rust_continuous(b: Bencher) {
         } else {
             viewport.scroll_line -= 3;
         }
-        down = !down;
+        down.toggle();
         let cursor_line = viewport.scroll_line;
         render_editor_frame(
             &mut renderer,
@@ -622,7 +622,7 @@ fn render_incremental_cursor_move(b: Bencher) {
     let mut step = true;
     bench_with_syscall_trace(b, || {
         let line = if step { base_line + 1 } else { base_line };
-        step = !step;
+        step.toggle();
         render_editor_frame(
             &mut renderer,
             &mut buffer,

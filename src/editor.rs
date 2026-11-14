@@ -795,7 +795,7 @@ impl Editor {
                 EditorAction::GotoTop => self.goto_top(),
                 EditorAction::GotoEnd => self.goto_end(),
                 EditorAction::ToggleRuler => {
-                    self.line_numbers_visible = !self.line_numbers_visible;
+                    self.line_numbers_visible.toggle();
                     self.renderer.force_full_redraw();
                 }
                 EditorAction::CommandPalette => {
@@ -994,7 +994,7 @@ impl Editor {
             CommandAction::Quit => self.quit(),
             CommandAction::Goto(n) => self.goto_line(n),
             CommandAction::ToggleRuler => {
-                self.line_numbers_visible = !self.line_numbers_visible;
+                self.line_numbers_visible.toggle();
                 self.renderer.force_full_redraw();
             }
             CommandAction::ReplaceAll {
