@@ -17,6 +17,54 @@ If this tool blocks the task, you may fix, test, open and merge a PR under Joshu
 standing instructions. Release only when needed to deliver the verified fix.\n\
 Procedure: https://github.com/joshuarli/usr/blob/main/dotfiles/base/.agents/instructions/owned-tools.md";
 
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    Edit,
+    Help,
+    Version,
+}
+
+struct OptionSpec {
+    short: &'static str,
+    long: &'static str,
+    description: &'static str,
+    invocation: Invocation,
+}
+
+const OPTIONS: &[OptionSpec] = &[
+    OptionSpec { short: "-h", long: "--help", description: "Print this help and exit", invocation: Invocation::Help },
+    OptionSpec { short: "-V", long: "--version", description: "Print the version and exit", invocation: Invocation::Version },
+];
+
+const EXAMPLES: &[&[&str]] = &[
+    &["e", "notes.txt"],
+    &["e", "--version"],
+];
+
+fn invocation(args: &[String]) -> &Invocation {
+    if args.len() == 2 {
+        for option in OPTIONS {
+            if args[1] == option.short || args[1] == option.long {
+                return &option.invocation;
+            }
+        }
+    }
+    &Invocation::Edit
+}
+
+fn help() -> String {
+    let mut text = String::from("Usage: e [file]\n\nEdit one file in a terminal, or open an unnamed buffer.\n\nArguments:\n  [file]  File to open (optional; defaults to an unnamed buffer)\n\nOptions:\n");
+    for option in OPTIONS {
+        text.push_str(&format!("  {}, {:<10}  {}\n", option.short, option.long, option.description));
+    }
+    text.push_str("\nWith no file, piped standard input becomes the unnamed buffer.\nHOME is required for persistent editor state.\nOptions are recognized only when supplied alone.\n\nExamples:\n");
+    for example in EXAMPLES {
+        text.push_str(&format!("  {}\n", example.join(" ")));
+    }
+    text.push_str(&format!("\n{OWNED_TOOL_FOOTER}\n"));
+    text
+}
+
 /// Ask a y/n question on the alternate screen. Answers come from the
 /// terminal even when stdin is a pipe carrying the document; with no
 /// terminal to ask, the caller gets an error instead of a silent "no".
@@ -146,14 +194,16 @@ fn main() {
 fn run() -> i32 {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() == 2 && (args[1] == "-h" || args[1] == "--help") {
-        println!("Usage: e [file]\n\n{OWNED_TOOL_FOOTER}");
-        return 0;
-    }
-
-    if args.len() == 2 && (args[1] == "-V" || args[1] == "--version") {
-        println!("e {}", env!("CARGO_PKG_VERSION"));
-        return 0;
+    match invocation(&args) {
+        Invocation::Help => {
+            print!("{}", help());
+            return 0;
+        }
+        Invocation::Version => {
+            println!("e {}", env!("CARGO_PKG_VERSION"));
+            return 0;
+        }
+        Invocation::Edit => {}
     }
 
     let piped_stdin = !io::stdin().is_terminal();
@@ -210,6 +260,30 @@ mod tests {
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn help_examples_parse_without_starting_the_editor() {
+        for example in EXAMPLES {
+            let args = args(example);
+            match invocation(&args) {
+                Invocation::Edit => assert!(load(&args, false, None, |_| Ok(true)).is_ok()),
+                Invocation::Help | Invocation::Version => {}
+            }
+        }
+        assert_eq!(invocation(&args(EXAMPLES[0])), &Invocation::Edit);
+        assert_eq!(invocation(&args(EXAMPLES[1])), &Invocation::Version);
+    }
+
+    #[test]
+    fn option_spellings_are_unique() {
+        let mut spellings = std::collections::HashSet::new();
+        for option in OPTIONS {
+            assert!(spellings.insert(option.short));
+            assert!(spellings.insert(option.long));
+            assert_eq!(invocation(&args(&["e", option.short])), &option.invocation);
+            assert_eq!(invocation(&args(&["e", option.long])), &option.invocation);
+        }
     }
 
     fn scratch_dir(name: &str) -> std::path::PathBuf {

@@ -22,7 +22,7 @@ cat notes.txt | e
 
 Standard input also opens an unnamed buffer, so `Ctrl+S` prompts for a filename. e asks before opening files larger than 5 MB or files it detects as likely binary.
 
-Use `e --version` to print the version.
+Use `e -h` or `e --help` for the complete command-line reference and `e -V` or `e --version` to print the version. These options are recognized when supplied alone.
 
 `Ctrl+S` saves. An unnamed buffer prompts for a filename. Saving removes trailing spaces and tabs on each line and adds a final newline. If the file changed on disk since it was opened, e refuses to overwrite it. `Ctrl+Q` quits; if the buffer has unsaved changes, e asks whether to save or discard them.
 
