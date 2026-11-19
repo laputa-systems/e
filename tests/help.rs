@@ -1,6 +1,17 @@
 use std::process::Command;
 
 #[test]
+fn too_many_file_arguments_exit_with_usage_error() {
+    let output = Command::new(env!("CARGO_BIN_EXE_e"))
+        .args(["one", "two"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, b"e: Usage: e [file]\n");
+}
+
+#[test]
 fn built_binary_help_has_owned_tool_footer() {
     let footer = "Maintained by Joshua Li: https://github.com/laputa-systems/e\n\
 Bugs and features: TODO.md in that repository (follow its AGENTS.md), or its issue tracker.\n\

@@ -1152,6 +1152,20 @@ mod tests {
     }
 
     #[test]
+    fn test_write_replaces_single_link_without_changing_open_reader() {
+        let dir = scratch_dir("write_atomic");
+        let path = dir.join("test.txt");
+        fs::write(&path, b"old\n").unwrap();
+        let mut old = fs::File::open(&path).unwrap();
+
+        save_cleaned(&path, b"new\n").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new\n");
+        assert_eq!(std::io::read_to_string(&mut old).unwrap(), "old\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_write_keeps_mode_and_follows_symlink() {
         let dir = scratch_dir("write_symlink");
         let real = dir.join("real.txt");

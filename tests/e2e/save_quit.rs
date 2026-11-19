@@ -22,17 +22,17 @@ fn save_writes_file() {
 #[test]
 fn save_strips_trailing_whitespace() {
     let dir = TempDir::new();
-    let path = create_file(dir.path(), "test.txt", "hello\n");
+    let path = create_file(dir.path(), "test.txt", "hello  \n");
     let mut e = TestEditor::new(&[path.to_str().unwrap()]);
     e.key(Key::End);
-    e.type_text("   "); // add trailing spaces
+    e.type_text("!   ");
     e.ctrl('s');
     e.wait_until(std::time::Duration::from_secs(2), |_| {
-        std::fs::read_to_string(&path).is_ok_and(|content| content == "hello\n")
+        std::fs::read_to_string(&path).is_ok_and(|content| content == "hello  !\n")
     });
     let content = std::fs::read_to_string(&path).unwrap();
     assert_eq!(
-        content, "hello\n",
+        content, "hello  !\n",
         "save should strip trailing whitespace, got: {content:?}"
     );
 }
