@@ -5,6 +5,35 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 
 ## Report
 
+Dead code (DSLP-5): on macOS ARM64, rustc 1.102.0-nightly checked
+all targets and features with `-W dead_code -W unreachable_pub`; the same
+check cross-compiled for aarch64 Linux musl. The base had 50 unreachable
+public items in the private PTY harness. Its remaining exports now have
+crate visibility and are used by `tests/e2e` scenarios. Removing the harness
+suppression exposed an unused `Key::CtrlShiftLeft` encoding and
+`TestEditor::quit_saving`; neither had a caller in source, tests, benchmarks,
+docs, build or package references. They were removed from the test adapter,
+not the editor: input parsing and editor dispatch still handle that key.
+`make test` exercises the consumer suite. No production behavior, CLI,
+format, dependency or hi-lite integration changed.
+
+The two buffer dead-code allowances were unnecessary: public `len` and
+`is_empty` are exercised by buffer unit tests, including the length property.
+The remaining test-only adapters have callers: `from_text` in buffer and
+render tests, `status_left` in editor tests, clipboard fixtures in clipboard
+and editor tests, and the sudo override in the file-session editor test.
+Other module-local helpers are checked by rustc with test targets enabled.
+The `signal` module's `allow(unused)` is retained; editor startup and terminal
+cleanup call it. No dead-code allowlist remains.
+
+cargo-machete 0.10.1 reports `laputa-hi-lite` as unused because its library
+is imported as `hi_lite`: renderer, document, editor and benchmark use it.
+It is retained. Debloat review retained the document/undo and line-index
+layers (editing invariants), terminal and PTY adapters (lifecycle and fixture
+isolation), syntax dependency, and benchmark tracing (Linux workload). The
+cut above is test-only; no additional structural cut was established. Linux
+was cross-checked, not executed; external library consumers were not surveyed.
+
 Ground at `4bc0854`, 2026-11-19. Both hosted default jobs ran
 `make test CI_TEST_MODE=hosted` and passed all 874 cases, including
 163 PTY cases. The hosted all-feature Clippy and the fleet
@@ -104,14 +133,6 @@ checks the highlight rendering, while a PTY highlight assertion remains absent.
 
 
 
-### DSLP-5 · P2 · Dead code: tools and debloat
-
-- **Area:** deslop · dead code
-- **Where:** whole repository
-- **Problem:** No dead-code scan has run.
-- **Recommendation:** Run the deslop Dead code step. Accept: tools clean or allowlisted with reasons; walk-backs filed as Needs owner tickets.
-- **Fix with:** deslop
-- **Effort:** M
 
 
 ### DSLP-6 · P2 · Long paths hide the filename and edit state in the status bar
