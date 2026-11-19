@@ -13,6 +13,27 @@ Build with `make build`; run unit and E2E tests with `cargo test --locked` (`car
 - Saving strips trailing ASCII spaces and tabs, ensures a final newline, and refuses a file whose modification time changed since load.
 - Persistent state requires `HOME` and uses owner-only directories and files.
 
+## Verification
+
+- `make test CI_TEST_MODE=hosted` runs locked unit and PTY tests.
+  Use a short absolute `TMPDIR` for the 80-column cases. The local warm
+  suite ran 874 cases in 7.68 s. See the backlog for cold and lint costs.
+  `make test-ci` selects the existing release binary through `E_TEST_BINARY`.
+- `make lint` checks the workspace and all targets. Hosted Clippy also enables
+  all features under the lock.
+- `tests/help.rs` checks CLI help. Startup, piped stdin, and invalid file exit
+  paths are exercised in `tests/e2e/startup_inputs.rs` and `startup.rs`.
+- `tests/e2e/terminal_lifecycle.rs` checks terminal mode restoration.
+  Editing, selection, clipboard, search, and mouse handling have separate PTY cases.
+- `tests/e2e/file_fidelity.rs` checks byte preservation.
+  `external_changes.rs`, `file_locks.rs`, and `persistent_undo.rs` cover save
+  conflicts, lock admission, and the persisted undo files.
+- `make bench` runs the editor workflows in `benches/bench.rs`. Use
+  `benches/baseline.json` and [the benchmark instructions](docs/benchmarks.md)
+  for an admitted comparison of edit, file, rendering, and search changes.
+- The separate nested tmux and loopback SSH reproduction is described in
+  [Testing](docs/testing.md).
+
 ## Topic map
 
 - Ownership and source layout: [architecture](docs/architecture.md)
