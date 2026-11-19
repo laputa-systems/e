@@ -12,7 +12,7 @@ cargo = $(if $(findstring -linux-musl,$(TARGET)),,$(if $(filter release-static t
 TEST_BINARY_ENV := E_TEST_BINARY
 TEST_TARGETS := --tests
 
-.PHONY: build test test-ci lint bench release verify-release install
+.PHONY: build test test-ci lint coverage bench release verify-release install
 .PHONY: record gifs
 
 build:
@@ -32,6 +32,9 @@ test-ci:
 
 lint:
 	cargo clippy --workspace --all-targets -- --deny warnings
+
+coverage:
+	cargo llvm-cov --locked --branch --html --output-dir .work/coverage
 
 bench:
 	cargo bench --bench bench

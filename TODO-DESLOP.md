@@ -70,19 +70,39 @@ after across `src`, `tests`, and `benches`. The search change preserves the
 regex result and existing viewport refresh; no user-visible contract or file
 format changed. The 32-bit persisted coordinate lead above remains unverified.
 
+Tests (DSLP-4, in progress): the contract map and tier costs are in AGENTS.md.
+An open reader now guards single-link atomic replacement; the whitespace save
+case waits for bytes different from its original fixture, and argument errors
+assert exit 1 and stderr. In-place overwrite, skipped whitespace stripping,
+and a success exit on bad arguments each made the respective test fail.
+On macOS ARM64, cargo-mutants 27.1.0 selected only the `meta.nlink() == 1`
+comparison in `write_file` (`--file src/file_io.rs --re
+'^src/file_io.rs:85:21:' --baseline run --gitignore true --timeout 30
+--build-timeout 210 --jobs 1 --jobserver-tasks 2 -- --lib`). One mutant was
+caught, none missed, timed out, or unviable; the existing hard-link and new
+open-reader assertions both failed. The trial used 291.71 s wall, one runner;
+the killed mutant is evidence, not an additional behavior. The same mutant on
+base 8523438 was already caught by the hard-link assertion, with 206.71 s wall
+on one runner; total trial cost was 498.42 s, with no survivors or exclusions.
+The open-reader fault independently demonstrates the newly protected behavior.
+The known xattr and split-input defects remain DSLP-7 and DSLP-8. Fatal signal
+recovery and crash/power-loss durability were not exercised.
+`make coverage` exited 2 with the same 13 deep-path PTY failures as the base;
+the subsequent partial report showed 83.79% lines and 63.44% branches, but
+terminal.rs reported 0%, so subprocess coverage is not established. The test
+time gate is deferred: `perf-gate-ready` reported a busy host. No retained mutation
+lane is added: one is required only where the tools are mirrored, and
+cargo-mutants is not on the crate mirror. DSLP-4 closes on the contract map,
+the three fault-proven boundary tests and the bounded single-link trial.
+The PTY test `find_live_search_highlights` asserts the prompt text rather than
+the highlight; it is retained for that assertion. `test_render_with_find_matches`
+checks the highlight rendering, while a PTY highlight assertion remains absent.
+
 ## Tickets
 
 
 
 
-### DSLP-4 · P2 · Tests: coverage, boundary gaps, mutation
-
-- **Area:** deslop · tests
-- **Where:** test suites and CI
-- **Problem:** Coverage and mutation results are unmeasured; no deslop mutation lane exists.
-- **Recommendation:** Run the deslop Tests step. Accept: no undispositioned survivor in critical code, the test cost budget holds, and the lane is green where the tools are mirrored.
-- **Fix with:** deslop
-- **Effort:** M
 
 ### DSLP-5 · P2 · Dead code: tools and debloat
 

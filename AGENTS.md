@@ -15,24 +15,29 @@ Build with `make build`; run unit and E2E tests with `cargo test --locked` (`car
 
 ## Verification
 
-- `make test CI_TEST_MODE=hosted` runs locked unit and PTY tests.
-  Use a short absolute `TMPDIR` for the 80-column cases. The local warm
-  suite ran 874 cases in 7.68 s. See the backlog for cold and lint costs.
-  `make test-ci` selects the existing release binary through `E_TEST_BINARY`.
-- `make lint` checks the workspace and all targets. Hosted Clippy also enables
-  all features under the lock.
-- `tests/help.rs` checks CLI help. Startup, piped stdin, and invalid file exit
-  paths are exercised in `tests/e2e/startup_inputs.rs` and `startup.rs`.
-- `tests/e2e/terminal_lifecycle.rs` checks terminal mode restoration.
-  Editing, selection, clipboard, search, and mouse handling have separate PTY cases.
-- `tests/e2e/file_fidelity.rs` checks byte preservation.
-  `external_changes.rs`, `file_locks.rs`, and `persistent_undo.rs` cover save
-  conflicts, lock admission, and the persisted undo files.
-- `make bench` runs the editor workflows in `benches/bench.rs`. Use
-  `benches/baseline.json` and [the benchmark instructions](docs/benchmarks.md)
-  for an admitted comparison of edit, file, rendering, and search changes.
-- The separate nested tmux and loopback SSH reproduction is described in
-  [Testing](docs/testing.md).
+- Edit: `cargo test --locked <test-name>` selects a focused case; cost varies.
+  Change: `cargo test --locked --test e2e <test-name>` selects a PTY scenario.
+  Full: `make test CI_TEST_MODE=hosted` runs locked unit and PTY tests; a warm
+  short-path run took 7.68 s. Deep absolute TMPDIR, one test thread: base and
+  candidate PTY runs took 51.14 s and 50.22 s, each with 13 DSLP-6 failures.
+  `make test-ci` selects the release binary through `E_TEST_BINARY`.
+- `make lint` took 2m 01s under load; hosted Clippy also enables all features.
+  Two single-mutant trials took 498.42 s combined on one runner.
+- Save: `file_io::tests::test_write_replaces_single_link_without_changing_open_reader`,
+  `test_write_keeps_mode_and_follows_symlink`, `test_write_hard_linked_file_stays_linked`,
+  `tests/e2e/file_fidelity.rs`, `save_quit.rs`, and `external_changes.rs` cover
+  replacement, links, mode, bytes, cleanup, and conflicts. Xattrs: DSLP-7.
+- Undo: `tests/e2e/undo.rs`, `persistent_undo.rs`, and
+  `document::tests::test_apply_batch_records_one_group_and_undoes_all_edits`.
+  Terminal restoration: `tests/e2e/terminal_lifecycle.rs` covers exit and four
+  signals; fatal signals remain unverified.
+- Input: `input::tests::test_utf8_ground_decodes_to_one_char`, `test_arrows`,
+  and `test_paste`; split escape sequences: DSLP-8. Search: `find::tests`,
+  `tests/e2e/find_replace.rs`, and `test_replace_all_refuses_invalid_utf8`.
+- CLI: `tests/help.rs` covers help and argument exit codes;
+  `tests/e2e/startup_inputs.rs` covers stdin and invalid file exit paths.
+- `make bench` runs editor workflows; see `benches/baseline.json` and
+  [benchmarks](docs/benchmarks.md). Nested tmux and SSH: [testing](docs/testing.md).
 
 ## Topic map
 
