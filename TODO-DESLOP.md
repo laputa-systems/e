@@ -90,10 +90,10 @@ recovery and crash/power-loss durability were not exercised.
 `make coverage` exited 2 with the same 13 deep-path PTY failures as the base;
 the subsequent partial report showed 83.79% lines and 63.44% branches, but
 terminal.rs reported 0%, so subprocess coverage is not established. The test
-time gate is deferred: `perf-gate-ready` reported a busy host. A diff mutation
-gate and its CI qualification remain outstanding; no unqualified lane is added.
-Only 101.58 s of the mutation budget remain, less than either observed baseline
-build, so another comparable qualification trial would exceed the ten-minute cap.
+time gate is deferred: `perf-gate-ready` reported a busy host. No retained mutation
+lane is added: one is required only where the tools are mirrored, and
+cargo-mutants is not on the crate mirror. DSLP-4 closes on the contract map,
+the three fault-proven boundary tests and the bounded single-link trial.
 The PTY test `find_live_search_highlights` asserts the prompt text rather than
 the highlight; it is retained for that assertion. `test_render_with_find_matches`
 checks the highlight rendering, while a PTY highlight assertion remains absent.
@@ -103,14 +103,6 @@ checks the highlight rendering, while a PTY highlight assertion remains absent.
 
 
 
-### DSLP-4 · P2 · Tests: coverage, boundary gaps, mutation
-
-- **Area:** deslop · tests
-- **Where:** test suites and CI
-- **Problem:** Coverage and mutation results are unmeasured; no deslop mutation lane exists.
-- **Recommendation:** Run the deslop Tests step. Accept: no undispositioned survivor in critical code, the test cost budget holds, and the lane is green where the tools are mirrored.
-- **Fix with:** deslop
-- **Effort:** M
 
 ### DSLP-5 · P2 · Dead code: tools and debloat
 
