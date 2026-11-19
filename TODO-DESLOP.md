@@ -31,18 +31,49 @@ record reproduced defects, and DSLP-9 records a test fixture failure. Linux,
 fatal-signal recovery, privileged saves, crash windows and non-UTF-8
 filenames were not exercised in this pass.
 
+Types (DSLP-3): measured on macOS ARM64 with rustc 1.102.0-nightly
+and Clippy 0.1.101, all targets and features, 23,779 first-party Rust
+lines. Counts below are raw diagnostics / unique message and location;
+duplicates include separate target builds. Each candidate was run alone
+with `cargo clippy --locked --all-targets --all-features -- -W <lint>`.
+
+- Adopted `unwrap_used` only in production `find` code: 396 / 386
+  repository-wide; seven unique production library locations, including two
+  in search and five buffer invariant assertions. The scoped lint rejects
+  the two former search unwraps; retaining the compiled regex removes them.
+  Its base negative witness fails on both lines. Existing search tests cover
+  matches, indexing and invalid UTF-8. The blanket lint is rejected: its five
+  buffer false positives exceed one per 5,000 lines; test and benchmark
+  unwraps are also intentional.
+- Rejected `unsafe_code` forbid: 16 / 7; terminal, signal and rendering
+  operations require or currently justify unsafe, with no proven defect.
+- Rejected `wildcard_enum_match_arm`: 47 / 37; intentional fallback arms
+  include partial command tests, input mappings and modal key handling.
+- Rejected `match_wildcard_for_single_variants`: 2 / 1; guarded mouse
+  alternatives leave modifier combinations for the wildcard, so it is not a
+  single-variant defect.
+- Rejected `cast_possible_truncation`: 57 / 33; many conversions are bounded
+  or in tests. The persisted 32-bit cursor and undo coordinates deserve a
+  large-file reproduction; their reachable impact is unverified.
+- Rejected `cast_sign_loss`: 17 / 12; bounded edit offsets and nonnegative
+  test generators account for findings, with no demonstrated defect.
+- Rejected `expect_used`: 24 / 22; two production renderer assertions follow
+  the language/highlighter setter invariant, and the rest are PTY harness
+  assertions. No trust was deleted by adopting it.
+- Rejected `redundant_clone`: 4 / 2; clone suggestions do not establish a
+  type defect or delete an escape hatch.
+- Rejected `needless_pass_by_value`: 9 / 6; ownership and callback interfaces
+  explain the reported cases, with no type defect or deleted escape hatch.
+
+The prescribed escape-hatch pattern counted 426 occurrences before and 424
+after across `src`, `tests`, and `benches`. The search change preserves the
+regex result and existing viewport refresh; no user-visible contract or file
+format changed. The 32-bit persisted coordinate lead above remains unverified.
+
 ## Tickets
 
 
 
-### DSLP-3 · P2 · Types: strict profile and typing findings
-
-- **Area:** deslop · types
-- **Where:** type checker and lint configuration; Rust sources
-- **Problem:** The strict-profile candidates in the deslop skill's tools reference have not been measured here.
-- **Recommendation:** Run the deslop Types step. Accept: clean at the adopted profile, escape hatches not increased, witnesses recorded.
-- **Fix with:** deslop
-- **Effort:** M
 
 ### DSLP-4 · P2 · Tests: coverage, boundary gaps, mutation
 

@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 use crate::buffer::{self, GapBuffer};
 use crate::selection::TextPosition;
 use crate::viewport::Viewport;
@@ -139,25 +141,23 @@ impl FindState {
                 return;
             }
         };
-        self.re = Some(re);
-
         if count_total {
-            let (total, skipped) = Self::count_all_matches(self.re.as_ref().unwrap(), buffer);
+            let (total, skipped) = Self::count_all_matches(&re, buffer);
             self.total_count = total;
             self.skipped_invalid_lines = skipped;
             self.total_count_known = true;
         }
+        self.re = Some(re);
         self.refresh_viewport_matches(buffer, viewport);
 
         // Land on the first match at or after the search-start position.
         if let Some(re) = self.re.as_ref() {
             self.current = Self::search_forward(buffer, re, self.search_start);
-        }
-        if let Some((start, _)) = self.current {
-            if count_total {
-                self.current_index = Self::match_index(self.re.as_ref().unwrap(), buffer, start);
+            if let Some((start, _)) = self.current && count_total {
+                self.current_index = Self::match_index(re, buffer, start);
             }
-        } else if !count_total {
+        }
+        if self.current.is_none() && !count_total {
             self.total_count_known = true;
         }
     }
