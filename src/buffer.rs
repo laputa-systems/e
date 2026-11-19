@@ -218,12 +218,10 @@ impl GapBuffer {
 
     // -- read access --------------------------------------------------------
 
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.len_logical()
     }
 
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len_logical() == 0
     }

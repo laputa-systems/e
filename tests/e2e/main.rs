@@ -6,7 +6,6 @@ mod external_changes;
 mod file_fidelity;
 mod file_locks;
 mod find_replace;
-#[allow(dead_code)]
 mod harness;
 mod mouse;
 mod movement;

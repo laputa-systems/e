@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use ptytest::ExitStatus;
+pub(crate) use ptytest::ExitStatus;
 use ptytest::{
     Color, CommandSpec, Deadline, ProtocolProfile, PtyTest, Scenario, Size,
     TerminalBaseline, TestEnv,
@@ -13,7 +13,7 @@ use ptytest::{
 // Key — editor-specific names for exact input sequences
 // ---------------------------------------------------------------------------
 
-pub enum Key {
+pub(crate) enum Key {
     Up,
     Down,
     Left,
@@ -31,7 +31,6 @@ pub enum Key {
     CtrlRight,
     CtrlShiftUp,
     CtrlShiftDown,
-    CtrlShiftLeft,
     CtrlShiftRight,
     ShiftTab,
 }
@@ -57,7 +56,6 @@ impl Key {
             Self::CtrlShiftUp => b"\x1b[1;6A",
             Self::CtrlShiftDown => b"\x1b[1;6B",
             Self::CtrlShiftRight => b"\x1b[1;6C",
-            Self::CtrlShiftLeft => b"\x1b[1;6D",
             Self::ShiftTab => b"\x1b[Z",
         }
     }
@@ -67,10 +65,10 @@ impl Key {
 // TempDir — editor fixtures remain application-specific
 // ---------------------------------------------------------------------------
 
-pub struct TempDir(PathBuf);
+pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         loop {
             let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -83,7 +81,7 @@ impl TempDir {
         }
     }
 
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.0
     }
 }
@@ -197,24 +195,24 @@ fn recording_path() -> Option<PathBuf> {
 /// made `wait` give up before the editor had drawn.
 const OUTPUT_WAIT: Duration = Duration::from_secs(2);
 
-pub struct TestEditor {
+pub(crate) struct TestEditor {
     terminal: PtyTest,
     terminal_baseline: TerminalBaseline,
     restoration_checked: bool,
     /// Shared so a later session can reuse the same isolated HOME.
-    pub home: Arc<TempDir>,
-    pub rows: u16,
-    pub cols: u16,
+    pub(crate) home: Arc<TempDir>,
+    pub(crate) rows: u16,
+    pub(crate) cols: u16,
     recording: Option<Recording>,
     recorded_output: usize,
 }
 
 impl TestEditor {
-    pub fn new(args: &[&str]) -> Self {
+    pub(crate) fn new(args: &[&str]) -> Self {
         Self::with_size(args, 24, 80)
     }
 
-    pub fn with_size(args: &[&str], rows: u16, cols: u16) -> Self {
+    pub(crate) fn with_size(args: &[&str], rows: u16, cols: u16) -> Self {
         let home = Arc::new(TempDir::new());
         let command = CommandSpec::new(selected_binary()).args(args.iter().copied());
         Self::spawn(home, command, rows, cols)
@@ -222,27 +220,27 @@ impl TestEditor {
 
     /// Start another session that sees the state files an earlier one left
     /// in the same isolated HOME. The earlier session must already be done.
-    pub fn next_session(&self, args: &[&str]) -> Self {
+    pub(crate) fn next_session(&self, args: &[&str]) -> Self {
         let command = CommandSpec::new(selected_binary()).args(args.iter().copied());
         Self::spawn(Arc::clone(&self.home), command, self.rows, self.cols)
     }
 
     /// Start a session that may stop before the editor screen appears (a
     /// startup prompt, or an error exit), so no editor UI is awaited.
-    pub fn next_session_before_ui(&self, args: &[&str]) -> Self {
+    pub(crate) fn next_session_before_ui(&self, args: &[&str]) -> Self {
         let command = CommandSpec::new(selected_binary()).args(args.iter().copied());
         Self::spawn_inner(Arc::clone(&self.home), command, self.rows, self.cols, false)
     }
 
     /// Like `next_session_before_ui`, in a fresh HOME.
-    pub fn before_ui(args: &[&str]) -> Self {
+    pub(crate) fn before_ui(args: &[&str]) -> Self {
         let command = CommandSpec::new(selected_binary()).args(args.iter().copied());
         Self::spawn_inner(Arc::new(TempDir::new()), command, 24, 80, false)
     }
 
     /// Start the editor with `input` piped to its stdin, as in
     /// `printf ... | e`. The terminal stays on the PTY, so keys still arrive.
-    pub fn piped(input: &[u8], args: &[&str]) -> Self {
+    pub(crate) fn piped(input: &[u8], args: &[&str]) -> Self {
         let home = Arc::new(TempDir::new());
         let input_path = home.path().join("stdin.bin");
         std::fs::write(&input_path, input).unwrap();
@@ -262,7 +260,7 @@ impl TestEditor {
     /// handlers to observe these signals. After the editor ends the shell
     /// prints its exit status and the terminal's line discipline flags
     /// (`stty -a`), which `shell_epilogue` reads back.
-    pub fn in_shell(args: &[&str]) -> Self {
+    pub(crate) fn in_shell(args: &[&str]) -> Self {
         let home = Arc::new(TempDir::new());
         let command = CommandSpec::new("/bin/sh")
             .arg("-c")
@@ -360,7 +358,7 @@ impl TestEditor {
     /// Wait for one editor output event. The public tests assert the resulting
     /// semantic row/cell state; a legitimate no-op input is allowed to remain
     /// silent instead of being turned into a timing failure.
-    pub fn wait(&mut self) {
+    pub(crate) fn wait(&mut self) {
         let deadline = self.terminal.deadline(OUTPUT_WAIT);
         // A timeout only means the input was a no-op: the output arrives
         // within milliseconds when there is any, so a generous deadline costs
@@ -369,7 +367,7 @@ impl TestEditor {
         self.capture_output();
     }
 
-    pub fn wait_until<F>(&mut self, timeout: Duration, mut ready: F)
+    pub(crate) fn wait_until<F>(&mut self, timeout: Duration, mut ready: F)
     where
         F: FnMut(&mut Self) -> bool,
     {
@@ -397,7 +395,7 @@ impl TestEditor {
         }
     }
 
-    pub fn send_raw(&mut self, bytes: &[u8]) {
+    pub(crate) fn send_raw(&mut self, bytes: &[u8]) {
         if let Some(recording) = &mut self.recording {
             recording.push('i', bytes);
         }
@@ -407,36 +405,36 @@ impl TestEditor {
             .expect("PTY write failed");
     }
 
-    pub fn type_text(&mut self, text: &str) {
+    pub(crate) fn type_text(&mut self, text: &str) {
         self.send_raw(text.as_bytes());
         self.wait();
     }
-    pub fn ctrl(&mut self, character: char) {
+    pub(crate) fn ctrl(&mut self, character: char) {
         self.send_raw(&[(character as u8) & 0x1f]);
         self.wait();
     }
-    pub fn key(&mut self, key: Key) {
+    pub(crate) fn key(&mut self, key: Key) {
         self.send_raw(key.as_bytes());
         self.wait();
     }
-    pub fn enter(&mut self) {
+    pub(crate) fn enter(&mut self) {
         self.send_raw(b"\r");
         self.wait();
     }
-    pub fn backspace(&mut self) {
+    pub(crate) fn backspace(&mut self) {
         self.send_raw(b"\x7f");
         self.wait();
     }
-    pub fn tab(&mut self) {
+    pub(crate) fn tab(&mut self) {
         self.send_raw(b"\t");
         self.wait();
     }
-    pub fn escape(&mut self) {
+    pub(crate) fn escape(&mut self) {
         self.send_raw(b"\x1b");
         self.wait();
     }
 
-    pub fn paste(&mut self, text: &str) {
+    pub(crate) fn paste(&mut self, text: &str) {
         self.send_raw(b"\x1b[200~");
         self.send_raw(text.as_bytes());
         self.send_raw(b"\x1b[201~");
@@ -445,35 +443,35 @@ impl TestEditor {
 
     // --- mouse events (SGR mode, 1-indexed) ---------------------------------
 
-    pub fn click(&mut self, row: u16, column: u16) {
+    pub(crate) fn click(&mut self, row: u16, column: u16) {
         let (row, column) = (row + 1, column + 1);
         self.send_raw(format!("\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m").as_bytes());
         self.wait();
     }
-    pub fn double_click(&mut self, row: u16, column: u16) {
+    pub(crate) fn double_click(&mut self, row: u16, column: u16) {
         self.click(row, column);
         self.click(row, column);
     }
-    pub fn triple_click(&mut self, row: u16, column: u16) {
+    pub(crate) fn triple_click(&mut self, row: u16, column: u16) {
         self.click(row, column);
         self.click(row, column);
         self.click(row, column);
     }
-    pub fn drag(&mut self, from: (u16, u16), to: (u16, u16)) {
+    pub(crate) fn drag(&mut self, from: (u16, u16), to: (u16, u16)) {
         let (from_row, from_column) = (from.0 + 1, from.1 + 1);
         let (to_row, to_column) = (to.0 + 1, to.1 + 1);
         self.send_raw(format!("\x1b[<0;{from_column};{from_row}M\x1b[<32;{to_column};{to_row}M\x1b[<0;{to_column};{to_row}m").as_bytes());
         self.wait();
     }
-    pub fn scroll_up(&mut self) {
+    pub(crate) fn scroll_up(&mut self) {
         self.send_raw(b"\x1b[<64;1;1M");
         self.wait();
     }
-    pub fn scroll_down(&mut self) {
+    pub(crate) fn scroll_down(&mut self) {
         self.send_raw(b"\x1b[<65;1;1M");
         self.wait();
     }
-    pub fn resize(&mut self, rows: u16, cols: u16) {
+    pub(crate) fn resize(&mut self, rows: u16, cols: u16) {
         self.terminal
             .resize(Size::new(cols, rows).expect("non-zero editor size"))
             .expect("resize PTY");
@@ -483,13 +481,13 @@ impl TestEditor {
     }
 
     /// Signal the editor's whole process group.
-    pub fn signal(&mut self, signal: i32) {
+    pub(crate) fn signal(&mut self, signal: i32) {
         self.terminal.signal(signal).expect("signal editor");
     }
 
     /// Fail unless the terminal modes (alternate screen, mouse, paste, cursor)
     /// are back to what they were before the editor started.
-    pub fn assert_terminal_restored(&mut self) {
+    pub(crate) fn assert_terminal_restored(&mut self) {
         self.terminal
             .assert_terminal_restored(&self.terminal_baseline)
             .expect("editor restored the terminal modes");
@@ -497,19 +495,19 @@ impl TestEditor {
 
     /// Wait for the shell started by `in_shell` to finish and return what it
     /// printed after the editor ended.
-    pub fn shell_epilogue(&mut self) -> String {
+    pub(crate) fn shell_epilogue(&mut self) -> String {
         self.wait_until(Duration::from_secs(5), |e| {
             e.screen_text().contains("shell-done")
         });
         self.screen_text()
     }
 
-    pub fn focus_in(&mut self) {
+    pub(crate) fn focus_in(&mut self) {
         self.send_raw(b"\x1b[I");
         self.wait();
     }
 
-    pub fn row(&mut self, row: u16) -> String {
+    pub(crate) fn row(&mut self, row: u16) -> String {
         self.terminal
             .drain(self.deadline())
             .expect("drain editor output");
@@ -522,14 +520,14 @@ impl TestEditor {
             .to_owned()
     }
 
-    pub fn screen_text(&mut self) -> String {
+    pub(crate) fn screen_text(&mut self) -> String {
         (0..self.rows)
             .map(|row| self.row(row))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    pub fn cursor(&mut self) -> (u16, u16) {
+    pub(crate) fn cursor(&mut self) -> (u16, u16) {
         self.terminal
             .drain(self.deadline())
             .expect("drain editor output");
@@ -539,7 +537,7 @@ impl TestEditor {
     }
 
     /// The editor draws its software cursor as bold inverse text.
-    pub fn cursor_visible(&mut self) -> bool {
+    pub(crate) fn cursor_visible(&mut self) -> bool {
         let (row, column) = self.cursor();
         self.terminal
             .screen()
@@ -547,13 +545,13 @@ impl TestEditor {
             .is_some_and(|cell| cell.attributes().bold && cell.attributes().inverse)
     }
 
-    pub fn status_bar(&mut self) -> String {
+    pub(crate) fn status_bar(&mut self) -> String {
         self.row(self.rows - 2)
     }
-    pub fn command_line(&mut self) -> String {
+    pub(crate) fn command_line(&mut self) -> String {
         self.row(self.rows - 1)
     }
-    pub fn cell_fg(&mut self, row: u16, column: u16) -> Color {
+    pub(crate) fn cell_fg(&mut self, row: u16, column: u16) -> Color {
         self.terminal
             .drain(self.deadline())
             .expect("drain editor output");
@@ -563,7 +561,7 @@ impl TestEditor {
             .cell(row as usize, column as usize)
             .map_or(Color::Default, |cell| cell.attributes().foreground.clone())
     }
-    pub fn cell_bg(&mut self, row: u16, column: u16) -> Color {
+    pub(crate) fn cell_bg(&mut self, row: u16, column: u16) -> Color {
         self.terminal
             .drain(self.deadline())
             .expect("drain editor output");
@@ -573,7 +571,7 @@ impl TestEditor {
             .cell(row as usize, column as usize)
             .map_or(Color::Default, |cell| cell.attributes().background.clone())
     }
-    pub fn cell_inverse(&mut self, row: u16, column: u16) -> bool {
+    pub(crate) fn cell_inverse(&mut self, row: u16, column: u16) -> bool {
         self.terminal
             .drain(self.deadline())
             .expect("drain editor output");
@@ -584,17 +582,12 @@ impl TestEditor {
             .is_some_and(|cell| cell.attributes().inverse)
     }
 
-    pub fn quit_no_save(&mut self) {
+    pub(crate) fn quit_no_save(&mut self) {
         self.ctrl('q');
         self.send_raw(b"n");
         self.wait();
     }
-    pub fn quit_saving(&mut self) {
-        self.ctrl('q');
-        self.send_raw(b"y");
-        self.wait();
-    }
-    pub fn wait_for_exit(&mut self) -> ExitStatus {
+    pub(crate) fn wait_for_exit(&mut self) -> ExitStatus {
         let deadline = self.deadline();
         let status = self
             .terminal
@@ -603,7 +596,7 @@ impl TestEditor {
         self.assert_normal_exit_restoration(status);
         status
     }
-    pub fn has_exited(&mut self) -> bool {
+    pub(crate) fn has_exited(&mut self) -> bool {
         let status = self.terminal.observe_exit().expect("observe editor exit");
         if let Some(status) = status {
             self.assert_normal_exit_restoration(status);
@@ -653,7 +646,7 @@ fn selected_binary() -> PathBuf {
 /// Replace a file's content behind the editor's back and give it a fixed,
 /// distinct modification time, so the change is detectable whatever the
 /// filesystem's timestamp granularity.
-pub fn modify_externally(path: &Path, content: &[u8]) {
+pub(crate) fn modify_externally(path: &Path, content: &[u8]) {
     std::fs::write(path, content).unwrap();
     std::fs::File::options()
         .write(true)
@@ -664,7 +657,7 @@ pub fn modify_externally(path: &Path, content: &[u8]) {
 }
 
 /// Create a file in an application fixture directory.
-pub fn create_file(dir: &Path, name: &str, content: &str) -> PathBuf {
+pub(crate) fn create_file(dir: &Path, name: &str, content: &str) -> PathBuf {
     let path = dir.join(name);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
