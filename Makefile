@@ -12,13 +12,14 @@ cargo = $(if $(findstring -linux-musl,$(TARGET)),,$(if $(filter release-static t
 TEST_BINARY_ENV := E_TEST_BINARY
 TEST_TARGETS := --tests
 
-.PHONY: build test test-ci lint coverage bench release verify-release install
+.PHONY: build test test-ci lint coverage bench bench-all bench-check bench-list release verify-release install
 .PHONY: record gifs
 
 build:
 	$(call cargo,dev) build
 
 test:
+	python3 tests/bench_driver.py
 ifeq ($(CI_TEST_MODE),hosted)
 	cargo test --locked
 else
@@ -37,6 +38,15 @@ coverage:
 	cargo llvm-cov --locked --branch --html --output-dir .work/coverage
 
 bench:
+	python3 scripts/bench.py run $(BENCH_ARGS)
+
+bench-check:
+	python3 scripts/bench.py check $(BENCH_ARGS)
+
+bench-list:
+	python3 scripts/bench.py list
+
+bench-all:
 	cargo bench --bench bench
 
 release:
