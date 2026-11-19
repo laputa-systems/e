@@ -1,9 +1,39 @@
 Prefix: DSLP
-Next: 10
+Next: 11
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier B). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
 ## Report
+
+Bench audit (2026-11-19, DSLP-10): the harness measures wall time and
+allocator counters within the benchmark process, with no checked performance
+gate. Ranked P3 because no regression is demonstrated: (1) no PTY startup or
+end-to-end input-to-screen journey, correctness oracle or completed-work check;
+(2) no matched interleaved reference, host gate or valid budget, and the old
+macOS baseline contains names absent from the current harness; (3) no complete
+CPU, memory and I/O attribution or pinned representative fixture corpus.
+Sampling the process with Instruments/perf, heap profiling and separate
+strace/dtruss runs are the cheapest attribution starting points; Linux marker
+support exists, but instrumented timings are not comparable to normal runs.
+The allocator measures in-process allocations, not whole-process RSS or child
+processes. Rustybench reports samples, but this driver neither filters host load
+nor claims a percentile or regression verdict. The baseline records three
+measured rounds after one warmup, without an interleaved candidate.
+
+Coverage map: file read/write measure component I/O, open-and-render measures
+loading, buffer creation and highlighting of Rust or generated 1/10 MiB Python;
+interactive typing/newline measure edits and cached rendering; multicursor,
+paste and batch undo exercise buffer/document edits; scroll, full frames and
+cursor move exercise viewport rendering and syntax/selection; forward and regex
+search, find trace and replace-all exercise search; command palette trace
+exercises goto and rendering. These use embedded source or synthetic Python,
+black-box outputs and unwrap errors, not output correctness assertions. They do
+not measure process startup, terminal transport, responsiveness distribution
+or filesystem cold-cache behavior. The 10 MiB case is Scenario, remaining
+workflows Change; Edit tests the driver. Full is explicit and never run here.
+Preflight cannot prove registry availability or absence of unrelated processes;
+Cargo handles stale builds. Each run records exclusions and a no-verdict warning.
+
 
 Dead code (DSLP-5): on macOS ARM64, rustc 1.102.0-nightly checked
 all targets and features with `-W dead_code -W unreachable_pub`; the same
@@ -173,4 +203,14 @@ checks the highlight rendering, while a PTY highlight assertion remains absent.
 - **Recommendation:** Build the symlink fixture from an absolute target or a target relative to the link's parent, and check that the fixture points to the file before exercising save.
 - **Fix with:** test-audit
 - **Effort:** S
+
+
+### DSLP-10 · P3 · Establish representative editor performance and attribution evidence
+
+- **Area:** benchmarks
+- **Where:** benches/bench.rs, benches/baseline.json, docs/benchmarks.md
+- **Problem:** Component workflows lack end-to-end startup and terminal latency, correctness and completed-work oracles, representative fixture diversity, host-gated interleaved comparisons, and process-wide CPU, memory and I/O attribution. The checked-in baseline names differ from the present harness and no gate compares it. No performance regression is demonstrated.
+- **Recommendation:** Add a PTY startup and edit journey with output checks; establish matched interleaved baselines and a host gate, and document separate sampling, allocation and syscall profiling for attribution.
+- **Fix with:** bench-pyramid
+- **Effort:** L
 
