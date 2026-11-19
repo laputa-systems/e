@@ -19,7 +19,11 @@ build:
 	$(call cargo,dev) build
 
 test:
+ifeq ($(CI_TEST_MODE),hosted)
+	cargo test --locked
+else
 	$(call cargo,test) test --quiet
+endif
 
 test-ci:
 	@test -x "target/$(TARGET)/dist/$(NAME)"
