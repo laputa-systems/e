@@ -631,6 +631,7 @@ impl Editor {
             name,
             self.document.is_dirty,
             lang_name,
+            self.viewport.width as usize,
             &mut self.status_left_text_cache,
         );
         let status_left = &self.status_left_text_cache;
@@ -658,10 +659,23 @@ impl Editor {
         )
     }
 
-    fn build_status_left(name: &str, dirty: bool, lang_name: &str, out: &mut String) {
+    fn build_status_left(name: &str, dirty: bool, lang_name: &str, width: usize, out: &mut String) {
         out.clear();
         out.push(' ');
-        out.push_str(name);
+        let name_chars = name.chars().count();
+        let available = width.saturating_sub(
+            1 + usize::from(dirty) + 3 + lang_name.chars().count() + Self::status_right().len(),
+        );
+        if name_chars > available && name.contains('/') && available > 1 {
+            let start = name
+                .char_indices()
+                .nth(name_chars - (available - 1))
+                .map_or(name.len(), |(i, _)| i);
+            out.push('…');
+            out.push_str(&name[start..]);
+        } else {
+            out.push_str(name);
+        }
         if dirty {
             out.push('*');
         }
@@ -674,7 +688,7 @@ impl Editor {
     fn status_left(&self, lang_name: &str) -> String {
         let name = self.document.file_path.as_deref().unwrap_or("[scratch]");
         let mut s = String::new();
-        Self::build_status_left(name, self.document.is_dirty, lang_name, &mut s);
+        Self::build_status_left(name, self.document.is_dirty, lang_name, usize::MAX, &mut s);
         s
     }
 
@@ -1322,3 +1336,43 @@ impl Editor {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod status_render_tests {
+    use super::*;
+
+    #[test]
+    fn long_path_status_survives_resize() {
+        let path = "/a/very/deep/absolute/scratch/checkout/with/many/directories/and/a/long/prefix/src/example.rs";
+        let mut document = Document::new(Vec::new(), Some(path.to_string()));
+        document.is_dirty = true;
+        let mut editor = Editor::from_parts(
+            document,
+            TextPosition::zero(),
+            Viewport::new(80, 24),
+            Clipboard::internal_only(),
+            KeybindingTable::with_defaults(),
+            false,
+            None,
+        );
+        for width in [80, 36, 120] {
+            editor.viewport.width = width;
+            let mut output = Vec::new();
+            editor.draw(&mut output).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            let row = output
+                .split("\x1b[0;100m").nth(1).unwrap()
+                .split("\x1b[0m").next().unwrap();
+            assert_eq!(row.chars().count(), width as usize, "{row:?}");
+            assert!(row.contains("example.rs* [Rust]"), "{row:?}");
+            if width < 120 {
+                assert!(row.starts_with(" …"), "{row:?}");
+                assert!(!row.contains("/a/very/deep"), "{row:?}");
+            } else {
+                let left = format!(" {path}* [Rust]");
+                let right = Editor::status_right();
+                assert_eq!(row, format!("{left}{}{right}", " ".repeat(120 - left.len() - right.len())));
+            }
+        }
+    }
+}

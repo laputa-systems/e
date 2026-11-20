@@ -165,14 +165,6 @@ checks the highlight rendering, while a PTY highlight assertion remains absent.
 
 
 
-### DSLP-6 · P2 · Long paths hide the filename and edit state in the status bar
-
-- **Area:** terminal rendering
-- **Where:** src/editor.rs:661, src/render.rs:893, tests/e2e/startup.rs:37
-- **Problem:** At 80 columns the renderer consumes the available width with the front of the full path. A deep scratch checkout reproduces the missing filename, language and dirty marker in 14 ordinary PTY cases. At revision 4bc0854 the same filename case fails with absolute TMPDIR="$PWD/.work/tmp" and passes with TMPDIR=.work/tmp.
-- **Recommendation:** Preserve the basename and edit state within the available terminal columns. Verify the rendered row and resize behavior with long path, dirty and named-language fixtures.
-- **Fix with:** root-cause
-- **Effort:** S
 
 
 ### DSLP-7 · P2 · Saving an existing file drops its extended attributes
