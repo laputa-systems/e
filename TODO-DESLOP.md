@@ -5,6 +5,12 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 
 ## Report
 
+DSLP-8 closed: input waits up to 100 ms between reads for an incomplete
+escape sequence. A split Right key now moves before typing, and standalone
+Escape clears a selection after the timeout. Gaps longer than 100 ms are
+ambiguous by design and are interpreted as a standalone Escape followed by
+subsequent input.
+
 DSLP-7 closed: atomic replacement copies each listed extended attribute before
 rename. A failed list, read, or set does not prevent the save; the save status
 warns about attributes that could not be preserved, or an unavailable list.
@@ -150,8 +156,7 @@ the killed mutant is evidence, not an additional behavior. The same mutant on
 base 8523438 was already caught by the hard-link assertion, with 206.71 s wall
 on one runner; total trial cost was 498.42 s, with no survivors or exclusions.
 The open-reader fault independently demonstrates the newly protected behavior.
-The known split-input defect remains DSLP-8. Fatal signal
-recovery and crash/power-loss durability were not exercised.
+Fatal signal recovery and crash/power-loss durability were not exercised.
 `make coverage` exited 2 with the same 13 deep-path PTY failures as the base;
 the subsequent partial report showed 83.79% lines and 63.44% branches, but
 terminal.rs reported 0%, so subprocess coverage is not established. The test
@@ -173,14 +178,6 @@ checks the highlight rendering, while a PTY highlight assertion remains absent.
 
 
 
-### DSLP-8 · P2 · A split arrow-key sequence inserts its suffix into the file
-
-- **Area:** terminal input
-- **Where:** src/editor.rs:273, src/editor.rs:284, src/input.rs:161, src/input.rs:192
-- **Problem:** A PTY session opened abc with a final newline, sent ESC separately, waited 300 ms, then sent [C followed by X and save. The editor saved [CXabc instead of moving right and saving aXbc. The input thread flushes ESC at the end of each read burst, so a terminal or remote link that fragments a key sequence turns its suffix into document text.
-- **Recommendation:** Disambiguate a standalone Escape using a bounded timeout that permits fragmented terminal sequences, and test split keys and standalone Escape through a PTY.
-- **Fix with:** root-cause
-- **Effort:** M
 
 
 ### DSLP-9 · P3 · The save symlink test fails when TMPDIR is relative

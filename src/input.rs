@@ -165,11 +165,32 @@ impl InputParser {
 
     /// Emit a pending bare Escape key. Returns None if nothing is pending.
     pub fn flush(&mut self) -> Option<EditorEvent> {
-        if self.buf_len == 1 && self.buf[0] == 0x1B {
+        if self.needs_flush() {
             self.buf_len = 0;
-            return Some(EditorEvent::Key(Key::Esc));
+            Some(EditorEvent::Key(Key::Esc))
+        } else {
+            None
         }
-        None
+    }
+
+    pub(crate) fn has_pending_escape(&self) -> bool {
+        self.buf_len > 0
+    }
+
+    pub(crate) fn flush_incomplete(&mut self) -> Vec<EditorEvent> {
+        if self.buf_len == 0 {
+            return Vec::new();
+        }
+        let buf = self.buf;
+        let len = self.buf_len as usize;
+        self.buf_len = 0;
+        let mut events = vec![EditorEvent::Key(Key::Esc)];
+        for &byte in &buf[1..len] {
+            if let Some(event) = self.advance(byte) {
+                events.push(event);
+            }
+        }
+        events
     }
 
     /// Feed a single byte into the parser. Returns `Some(event)` when a
@@ -719,6 +740,22 @@ mod tests {
         let ev = parser.flush();
         assert!(matches!(ev, Some(EditorEvent::Key(Key::Esc))));
         assert!(!parser.needs_flush());
+    }
+
+    #[test]
+    fn test_incomplete_escape_flush_replays_prefix() {
+        let mut parser = InputParser::new();
+        for &byte in b"\x1b[1;" {
+            assert!(parser.advance(byte).is_none());
+        }
+        assert!(parser.has_pending_escape());
+        assert!(matches!(parser.flush_incomplete().as_slice(), [
+            EditorEvent::Key(Key::Esc),
+            EditorEvent::Key(Key::Char('[')),
+            EditorEvent::Key(Key::Char('1')),
+            EditorEvent::Key(Key::Char(';')),
+        ]));
+        assert!(!parser.has_pending_escape());
     }
 
     #[test]

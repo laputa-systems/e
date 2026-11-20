@@ -430,8 +430,12 @@ impl TestEditor {
         self.wait();
     }
     pub(crate) fn escape(&mut self) {
+        let before_screen = self.screen_text();
+        let before_cursor = self.cursor_visible();
         self.send_raw(b"\x1b");
-        self.wait();
+        self.wait_until(Duration::from_secs(2), |editor| {
+            editor.cursor_visible() != before_cursor || editor.screen_text() != before_screen
+        });
     }
 
     pub(crate) fn paste(&mut self, text: &str) {
