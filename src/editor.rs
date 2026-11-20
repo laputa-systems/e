@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,7 @@ mod movement;
 
 use caret_edits::PlannedCaretEdit;
 const SCROLL_LINES: usize = 3;
+const ESCAPE_TIMEOUT: Duration = Duration::from_millis(100);
 
 fn auto_close_char(c: char, lang_name: Option<&str>) -> Option<char> {
     match c {
@@ -260,17 +262,49 @@ impl Editor {
         let tx_input = tx.clone();
         let use_tty = self.piped_stdin;
         std::thread::spawn(move || {
-            let mut reader: Box<dyn Read> = if use_tty {
+            let mut reader = if use_tty {
                 match File::open("/dev/tty") {
-                    Ok(f) => Box::new(f),
+                    Ok(f) => f,
                     Err(_) => return,
                 }
             } else {
-                Box::new(io::stdin())
+                match io::stdin().as_fd().try_clone_to_owned() {
+                    Ok(fd) => File::from(fd),
+                    Err(_) => return,
+                }
             };
             let mut parser = InputParser::new();
             let mut buf = [0u8; 256];
             loop {
+                if parser.has_pending_escape() {
+                    let deadline = Instant::now() + ESCAPE_TIMEOUT;
+                    loop {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        let mut poll_fd = libc::pollfd {
+                            fd: reader.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        };
+                        // SAFETY: poll_fd is valid for one pollfd for the duration of the call.
+                        let result = unsafe {
+                            libc::poll(&mut poll_fd, 1, remaining.as_millis().min(i32::MAX as u128) as i32)
+                        };
+                        if result > 0 {
+                            break;
+                        }
+                        if result < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                            return;
+                        }
+                        if Instant::now() >= deadline {
+                            for event in parser.flush_incomplete() {
+                                if tx_input.send(event).is_err() {
+                                    return;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
@@ -280,14 +314,6 @@ impl Editor {
                             {
                                 return;
                             }
-                        }
-                        // After each read burst, flush pending bare ESC.
-                        // Terminal emulators send escape sequences atomically,
-                        // so a pending ESC means the user pressed Escape alone.
-                        if let Some(ev) = parser.flush()
-                            && tx_input.send(ev).is_err()
-                        {
-                            return;
                         }
                     }
                     Err(_) => break,

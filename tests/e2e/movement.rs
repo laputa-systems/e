@@ -1,6 +1,31 @@
 use super::harness::*;
 
 #[test]
+fn split_escape_sequence_moves_right_before_typing() {
+    let dir = TempDir::new();
+    let path = create_file(dir.path(), "test.txt", "abc\n");
+    let mut e = TestEditor::new(&[path.to_str().unwrap()]);
+    e.send_raw(b"\x1b");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    e.send_raw(b"[CX\x13");
+    e.wait_until(std::time::Duration::from_secs(2), |_| {
+        std::fs::read(&path).is_ok_and(|bytes| bytes != b"abc\n")
+    });
+    assert_eq!(std::fs::read(&path).unwrap(), b"aXbc\n");
+}
+
+#[test]
+fn standalone_escape_clears_selection_after_timeout() {
+    let dir = TempDir::new();
+    let path = create_file(dir.path(), "test.txt", "abc\n");
+    let mut e = TestEditor::new(&[path.to_str().unwrap()]);
+    e.key(Key::ShiftRight);
+    assert!(!e.cursor_visible());
+    e.send_raw(b"\x1b");
+    e.wait_until(std::time::Duration::from_millis(500), |editor| editor.cursor_visible());
+}
+
+#[test]
 fn arrow_down_moves_cursor() {
     let dir = TempDir::new();
     let path = create_file(dir.path(), "test.txt", "line one\nline two\nline three\n");
