@@ -1152,6 +1152,27 @@ mod tests {
     }
 
     #[test]
+    fn test_write_preserves_extended_attributes() {
+        let dir = scratch_dir("write_xattr");
+        let path = dir.join("test.txt");
+        fs::write(&path, b"old\n").unwrap();
+        let name = "user.e-test";
+        if let Err(error) = rustix::fs::setxattr(&path, name, b"metadata", rustix::fs::XattrFlags::empty()) {
+            eprintln!("skipping xattr test: filesystem rejected xattr: {error}");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+
+        save_cleaned(&path, b"new\n").unwrap();
+
+        let mut value = [0; 64];
+        let len = rustix::fs::getxattr(&path, name, &mut value[..]).unwrap();
+        assert_eq!(&value[..len], b"metadata");
+        assert_eq!(fs::read(&path).unwrap(), b"new\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_write_replaces_single_link_without_changing_open_reader() {
         let dir = scratch_dir("write_atomic");
         let path = dir.join("test.txt");

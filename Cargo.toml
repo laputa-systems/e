@@ -10,7 +10,7 @@ laputa-hi-lite = { version = "0.4.0", registry = "stuff-native" }
 rustc-hash = "2.1"
 regex-lite = "0.1"
 libc = { version = "0.2" }
-rustix = { package = "laputa-rustix", version = "=1.1.6", registry = "stuff-native", features = ["termios"] }
+rustix = { package = "laputa-rustix", version = "=1.1.6", registry = "stuff-native", features = ["termios", "fs"] }
 
 [dev-dependencies]
 rustybench = "0.5"
