@@ -5,6 +5,12 @@ Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/mai
 
 ## Report
 
+DSLP-7 closed: atomic replacement copies each listed extended attribute before
+rename. A failed list, read, or set does not prevent the save; the save status
+warns about attributes that could not be preserved, or an unavailable list.
+Hard-linked files retain their existing in-place save behavior, and symlinks
+continue to be followed.
+
 Bench audit (2026-11-19, DSLP-10): the harness measures wall time and
 allocator counters within the benchmark process, with no checked performance
 gate. Ranked P3 because no regression is demonstrated: (1) no PTY startup or
@@ -144,7 +150,7 @@ the killed mutant is evidence, not an additional behavior. The same mutant on
 base 8523438 was already caught by the hard-link assertion, with 206.71 s wall
 on one runner; total trial cost was 498.42 s, with no survivors or exclusions.
 The open-reader fault independently demonstrates the newly protected behavior.
-The known xattr and split-input defects remain DSLP-7 and DSLP-8. Fatal signal
+The known split-input defect remains DSLP-8. Fatal signal
 recovery and crash/power-loss durability were not exercised.
 `make coverage` exited 2 with the same 13 deep-path PTY failures as the base;
 the subsequent partial report showed 83.79% lines and 63.44% branches, but
@@ -165,16 +171,6 @@ checks the highlight rendering, while a PTY highlight assertion remains absent.
 
 
 
-
-
-### DSLP-7 · P2 · Saving an existing file drops its extended attributes
-
-- **Area:** file saving
-- **Where:** src/file_io.rs:136, src/file_io.rs:151, src/file_io.rs:158, tests/e2e/file_fidelity.rs:4
-- **Problem:** On macOS, a PTY session opened a single-link file with com.example.e-diagnose=important metadata, inserted X and saved successfully. The file contained Xoriginal followed by a newline, but xattr no longer listed the attribute. The atomic replacement copies owner and mode but replaces the inode without copying extended attributes; user metadata is silently lost on an ordinary save.
-- **Recommendation:** Preserve relevant extended attributes and other supported metadata when replacing a file, and add a filesystem-backed editor save regression covering their contents and failure behavior.
-- **Fix with:** os-boundaries
-- **Effort:** M
 
 
 ### DSLP-8 · P2 · A split arrow-key sequence inserts its suffix into the file
