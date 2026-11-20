@@ -203,8 +203,8 @@ impl Editor {
         let expected_mtime = self.expected_mtime_for_save(path);
         let cleaned = file_io::clean_for_write(&self.document.buffer.contents());
         match file_io::write_file(path_ref, &cleaned, expected_mtime) {
-            Ok(()) => {
-                self.finish_save(path, "");
+            Ok(warnings) => {
+                self.finish_save(path, "", &warnings);
                 SaveOutcome::Saved
             }
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
@@ -225,19 +225,20 @@ impl Editor {
         }
     }
 
-    fn finish_save(&mut self, path: &str, via: &str) {
+    fn finish_save(&mut self, path: &str, via: &str, warnings: &[String]) {
         let path_ref = Path::new(path);
         self.document.file_path = Some(path.to_string());
         self.document.is_dirty = false;
         self.document.seal_undo();
         self.file_modification_time = file_io::file_modification_time(path_ref);
-        match self.persist_undo_history(path_ref) {
-            Ok(()) => self.set_status(format!("Saved {}{}", path, via)),
-            Err(e) => self.set_status(format!(
-                "Saved {}{} (undo history not saved: {})",
-                path, via, e
-            )),
+        let mut status = format!("Saved {}{}", path, via);
+        if !warnings.is_empty() {
+            status.push_str(&format!("; could not preserve xattr: {}", warnings.join(", ")));
         }
+        if let Err(e) = self.persist_undo_history(path_ref) {
+            status.push_str(&format!(" (undo history not saved: {})", e));
+        }
+        self.set_status(status);
     }
 
     /// Keep the cleaned bytes in memory while the sudo password is asked for,
@@ -298,7 +299,7 @@ impl Editor {
         // `tee` truncates in place, so the file keeps its owner and mode, and
         // taking the content on stdin avoids a staging file other users could read.
         if run_sudo(&["-n", "tee", "--", &path], &cleaned) {
-            self.finish_save(&path, " (sudo)");
+            self.finish_save(&path, " (sudo)", &[]);
             SaveOutcome::Saved
         } else {
             self.set_status("sudo save failed".to_string());

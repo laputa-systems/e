@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -57,7 +58,18 @@ pub fn write_file(
     path: &Path,
     data: &[u8],
     expected_mtime: Option<SystemTime>,
-) -> io::Result<()> {
+) -> io::Result<Vec<String>> {
+    write_file_with_xattr_setter(path, data, expected_mtime, &|file, name, value, flags| {
+        rustix::fs::fsetxattr(file, name, value, flags)
+    })
+}
+
+fn write_file_with_xattr_setter(
+    path: &Path,
+    data: &[u8],
+    expected_mtime: Option<SystemTime>,
+    set_xattr: &impl Fn(&fs::File, &std::ffi::OsStr, &[u8], rustix::fs::XattrFlags) -> rustix::io::Result<()>,
+) -> io::Result<Vec<String>> {
     let target = match fs::canonicalize(path) {
         Ok(resolved) => resolved,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -66,7 +78,7 @@ pub fn write_file(
                 if file_modification_time(&resolved) != expected_mtime {
                     return Err(changed_on_disk_error());
                 }
-                return write_new_file(&resolved, data);
+                return write_new_file(&resolved, data).map(|()| Vec::new());
             }
             path.to_path_buf()
         }
@@ -78,19 +90,22 @@ pub fn write_file(
     let meta = match fs::metadata(&target) {
         Ok(meta) => meta,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return write_new_file(&target, data);
+            return write_new_file(&target, data).map(|()| Vec::new());
         }
         Err(e) => return Err(e),
     };
-    if meta.nlink() == 1 && replace_file(&target, data, &meta)? == Replaced::Done {
-        return Ok(());
+    if meta.nlink() == 1
+        && let Replaced::Done(warnings) = replace_file(&target, data, &meta, set_xattr)?
+    {
+        return Ok(warnings);
     }
     let mut file = fs::OpenOptions::new()
         .write(true)
         .truncate(true)
         .open(&target)?;
     file.write_all(data)?;
-    file.sync_all()
+    file.sync_all()?;
+    Ok(Vec::new())
 }
 
 fn write_new_file(path: &Path, data: &[u8]) -> io::Result<()> {
@@ -127,13 +142,18 @@ fn resolve_dangling_symlink_target(mut path: PathBuf) -> io::Result<PathBuf> {
 
 #[derive(PartialEq, Eq)]
 enum Replaced {
-    Done,
+    Done(Vec<String>),
     /// The rename strategy cannot keep the target's owner or location
     /// semantics; the caller must write in place.
     Unavailable,
 }
 
-fn replace_file(target: &Path, data: &[u8], meta: &fs::Metadata) -> io::Result<Replaced> {
+fn replace_file(
+    target: &Path,
+    data: &[u8],
+    meta: &fs::Metadata,
+    set_xattr: &impl Fn(&fs::File, &std::ffi::OsStr, &[u8], rustix::fs::XattrFlags) -> rustix::io::Result<()>,
+) -> io::Result<Replaced> {
     let dir = target.parent().unwrap_or(Path::new("."));
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     let temp = dir.join(format!(".{}.e-tmp-{}", name, std::process::id()));
@@ -154,17 +174,49 @@ fn replace_file(target: &Path, data: &[u8], meta: &fs::Metadata) -> io::Result<R
             return Ok(Replaced::Unavailable);
         }
         file.set_permissions(fs::Permissions::from_mode(meta.mode()))?;
+        let warnings = copy_xattrs(target, &file, set_xattr);
         file.sync_all()?;
         fs::rename(&temp, target)?;
-        Ok(Replaced::Done)
+        Ok(Replaced::Done(warnings))
     })();
-    if !matches!(staged, Ok(Replaced::Done)) {
+    if !matches!(staged, Ok(Replaced::Done(_))) {
         let _ = fs::remove_file(&temp);
     }
-    if matches!(staged, Ok(Replaced::Done)) {
+    if matches!(staged, Ok(Replaced::Done(_))) {
         sync_parent_dir(target)?;
     }
     staged
+}
+
+fn copy_xattrs(
+    target: &Path,
+    destination: &fs::File,
+    set_xattr: &impl Fn(&fs::File, &std::ffi::OsStr, &[u8], rustix::fs::XattrFlags) -> rustix::io::Result<()>,
+) -> Vec<String> {
+    let copy = || -> io::Result<Vec<String>> {
+        let source = fs::File::open(target)?;
+        let size = rustix::fs::flistxattr_query(&source)?;
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let mut names = vec![0; size];
+        let len = rustix::fs::flistxattr(&source, &mut names[..])?;
+        let mut failed = Vec::new();
+        for bytes in names[..len].split(|&byte| byte == 0).filter(|name| !name.is_empty()) {
+            let name = std::ffi::OsStr::from_bytes(bytes);
+            let result = (|| {
+                let size = rustix::fs::fgetxattr_query(&source, name)?;
+                let mut value = vec![0; size];
+                let len = rustix::fs::fgetxattr(&source, name, &mut value[..])?;
+                set_xattr(destination, name, &value[..len], rustix::fs::XattrFlags::empty())
+            })();
+            if result.is_err() {
+                failed.push(name.to_string_lossy().into_owned());
+            }
+        }
+        Ok(failed)
+    };
+    copy().unwrap_or_else(|_| vec!["(attribute list unavailable)".to_string()])
 }
 
 /// Persist a create or rename by fsyncing the containing directory.
@@ -1116,7 +1168,7 @@ mod tests {
             path,
             &clean_for_write(data),
             file_modification_time(path),
-        )
+        ).map(|_| ())
     }
 
     #[test]
@@ -1169,6 +1221,28 @@ mod tests {
         let len = rustix::fs::getxattr(&path, name, &mut value[..]).unwrap();
         assert_eq!(&value[..len], b"metadata");
         assert_eq!(fs::read(&path).unwrap(), b"new\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_warns_when_xattr_cannot_be_set() {
+        let dir = scratch_dir("write_xattr_failure");
+        let path = dir.join("test.txt");
+        fs::write(&path, b"old\n").unwrap();
+        let name = "user.e-test-failure";
+        if let Err(error) = rustix::fs::setxattr(&path, name, b"metadata", rustix::fs::XattrFlags::empty()) {
+            eprintln!("skipping xattr test: filesystem rejected xattr: {error}");
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+        let mut old = fs::File::open(&path).unwrap();
+        let warnings = write_file_with_xattr_setter(
+            &path, b"new\n", file_modification_time(&path),
+            &|_, _, _, _| Err(rustix::io::Errno::PERM),
+        ).unwrap();
+        assert!(warnings.iter().any(|warning| warning == name));
+        assert_eq!(fs::read(&path).unwrap(), b"new\n");
+        assert_eq!(std::io::read_to_string(&mut old).unwrap(), "old\n");
         let _ = fs::remove_dir_all(&dir);
     }
 
