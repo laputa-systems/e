@@ -1,9 +1,49 @@
 Prefix: DSLP
-Next: 11
+Next: 12
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier B). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
 ## Report
+
+DSLP-1 grounded the campaign at `4bc0854` on macOS ARM64 with rustc
+1.102.0-nightly. Ground landed in [#30](https://github.com/laputa-systems/e/pull/30),
+then the campaign merged [#31–#38](https://github.com/laputa-systems/e/pulls?q=is%3Apr+is%3Amerged+). The remaining tickets are DSLP-9 (P3, relative
+TMPDIR symlink fixture) and DSLP-10 (P3, performance evidence).
+
+**Scorecard**
+
+| Measure | Before | After / disposition |
+| --- | --- | --- |
+| Lines in `src/` and `tests/` | 19,506 and 3,862 | 19,736 and 3,963 at `c8aa7b49`. Counts are newline counts of tracked files from `git ls-tree` and `git show` piped to `wc -l`. |
+| Warm `make test` | 7.68 s, short absolute TMPDIR, 874 cases passed under shared load | Not measured comparably. [#38](https://github.com/laputa-systems/e/pull/38) reports a passing short-path run; the timing gate was deferred on a busy host. |
+| Coverage | Not measured | Partial: 83.79% lines, 63.44% branches. `make coverage` failed on 13 deep-path PTY cases and subprocess coverage was not established. |
+| Bounded mutation trial | One single-link guard mutant caught, 206.71 s | Same mutant caught, 291.71 s; no survivors. This is one targeted mutant, not a suite-wide score. |
+| Escape hatches | 426 prescribed pattern occurrences across `src`, `tests` and `benches` | 424; two search unwraps removed. Unsafe and cast lint candidates were rejected; the 32-bit persisted-coordinate lead remains unverified. |
+| Dead code | 50 unreachable public items in the private PTY harness | Visibility narrowed, two unused test helpers and two unnecessary buffer allowances removed; Linux cross-compiled, not run in that audit. |
+| Findings | DSLP-6, DSLP-7 and DSLP-8 were P2; DSLP-9 was P3 | P2 fixes merged in #36–#38; DSLP-9 and benchmark gap DSLP-10 remain P3. |
+| Performance | No checked comparison gate | Tiered benchmark driver added in #35; no regression verdict. Representative end-to-end and attribution evidence remains DSLP-10. |
+| Escaped regressions | Not measured | No campaign-wide escaped-regression count measured. Linux CI's `undo::multiple_undo_redo_steps` failed on [#37's first run](https://github.com/laputa-systems/e/actions/runs/44646218368) and passed on rerun; this is an unfiled flaky-test observation. |
+
+The tests now protect atomic replacement for an already-open reader, trailing
+whitespace stripping, CLI error exits, long-path status display, xattr save
+behavior and fragmented input. Fault injection or a base failure demonstrated
+each added boundary. Fatal-signal recovery, crash or power-loss durability,
+privileged saves, non-UTF-8 filenames and PTY highlight rendering remain
+unverified in the recorded audit. Input gaps over 100 ms remain ambiguous.
+
+**Steps and cost**
+
+- Ground: [#30](https://github.com/laputa-systems/e/pull/30). The cold local test took 429.80 s; warm deep-path test 8.58 s failed 14 PTY cases, while the short-path run above passed. Local lint took 249.72 s under load.
+- Diagnose: [#31](https://github.com/laputa-systems/e/pull/31). Reproduced xattr loss, fragmented input and the relative TMPDIR fixture failure. Step cost not measured.
+- Types: [#32](https://github.com/laputa-systems/e/pull/32). Tested nine lint candidates and adopted a scoped search unwrap lint. Step cost not measured.
+- Tests: [#33](https://github.com/laputa-systems/e/pull/33). Added three fault-proven boundary tests; the two mutation trials took 498.42 s combined on one runner.
+- Dead code: [#34](https://github.com/laputa-systems/e/pull/34). Removed unused test adapters and checked all targets and features, including a Linux cross-check. Step cost not measured.
+- Bench: [#35](https://github.com/laputa-systems/e/pull/35). Added tiered selection and recorded the remaining evidence gaps. Step cost not measured.
+- DSLP-6: [#36](https://github.com/laputa-systems/e/pull/36). Fixed status truncation; deep-path `make test` passed all 163 PTY cases. Step cost not measured.
+- DSLP-7: [#37](https://github.com/laputa-systems/e/pull/37). Preserved xattrs on atomic save with warnings for copy failures. Step cost not measured.
+- DSLP-8: [#38](https://github.com/laputa-systems/e/pull/38). Added the 100 ms input wait and regression coverage. Step cost not measured.
+
+The detailed step records below provide the measurement conditions and limits.
 
 DSLP-8 closed: input waits up to 100 ms between reads for an incomplete
 escape sequence. A split Right key now moves before typing, and standalone
@@ -198,4 +238,14 @@ checks the highlight rendering, while a PTY highlight assertion remains absent.
 - **Recommendation:** Add a PTY startup and edit journey with output checks; establish matched interleaved baselines and a host gate, and document separate sampling, allocation and syscall profiling for attribution.
 - **Fix with:** bench-pyramid
 - **Effort:** L
+
+
+### DSLP-11 · P3 · The split-escape PTY test is timing-sensitive on hosted macOS
+
+- **Area:** tests
+- **Where:** tests/e2e/movement.rs:4 (split_escape_sequence_moves_right_before_typing)
+- **Problem:** The DSLP-8 regression writes ESC, sleeps 20 ms, then writes `[CX`. On hosted macOS CI (run 44649416152, PR #39) it saved `[CXabc` instead of `aXbc`: the editor flushed ESC on its 100 ms timeout, so the runner delayed the second write past the window. Locally and on #38's CI it passed. The test asserts a wall-clock race, so a loaded runner can fail it without a product defect.
+- **Recommendation:** Make the fragment boundary deterministic without a wall-clock race, for example by waiting until the editor has consumed the lone ESC before the second write, or by exercising the reader with a controllable timeout below the PTY layer; keep a test that fails on the pre-DSLP-8 read-boundary flush.
+- **Fix with:** deslop
+- **Effort:** S
 
