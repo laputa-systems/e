@@ -195,7 +195,12 @@ fn copy_xattrs(
 ) -> Vec<String> {
     let copy = || -> io::Result<Vec<String>> {
         let source = fs::File::open(target)?;
-        let size = rustix::fs::flistxattr_query(&source)?;
+        let size = match rustix::fs::flistxattr_query(&source) {
+            Ok(size) => size,
+            // A filesystem without extended attributes has none to lose.
+            Err(rustix::io::Errno::NOTSUP) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
         if size == 0 {
             return Ok(Vec::new());
         }
