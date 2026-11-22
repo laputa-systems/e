@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Cheap selection and preflight checks; never run a benchmark."""
 import importlib.util
+import json
 import os
 import re
 from pathlib import Path
@@ -63,6 +64,20 @@ class DriverTest(unittest.TestCase):
             self.assertEqual(driver.main(), 1)
             summary = next((Path(temp) / '.work/bench').glob('*/summary.json'))
             self.assertIn('"exit": 7', summary.read_text())
+
+    def test_successful_process_must_report_the_selected_measurement(self):
+        name = 'render_full_frame_plain'
+        for status, data in ((1, {'name': f'bench::{name}'}),
+                             (0, {'name': f'bench::{name}', 'sample_count': 1, 'iter_count': 1, 'median_ns': 42})):
+            output = json.dumps({'benchmarks': [data]})
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp, \
+                 mock.patch.object(driver, 'ROOT', Path(temp)), \
+                 mock.patch.object(driver, 'preflight', return_value=[]), \
+                 mock.patch.object(driver, 'command', return_value=[sys.executable, '-c', f'print({output!r})']), \
+                 mock.patch.object(sys, 'argv', ['bench.py', 'run', '--tier', 'Change', '--name', name]):
+                self.assertEqual(driver.main(), status)
+                summary = next((Path(temp) / '.work/bench').glob('*/summary.json'))
+                self.assertEqual(json.loads(summary.read_text())['workloads'][0]['exit'], status)
 
 
 if __name__ == '__main__':

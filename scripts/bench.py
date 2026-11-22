@@ -33,7 +33,30 @@ def command(name):
     if name == 'driver-self-test':
         return [sys.executable, 'tests/bench_driver.py']
     cmd = ['cargo', 'bench', '--locked', '--bench', 'bench']
-    return cmd if name == 'all' else cmd + ['--', 'bench::' + name, '--exact']
+    return cmd if name == 'all' else cmd + ['--', 'bench::' + name, '--exact', '--format', 'json']
+
+
+def has_measurement(log: str, name: str) -> bool:
+    for line in log.splitlines():
+        try:
+            report: object = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(report, dict):
+            continue
+        entries: object = report.get('benchmarks')
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get('name') != f'bench::{name}':
+                continue
+            samples: object = entry.get('sample_count')
+            iterations: object = entry.get('iter_count')
+            median: object = entry.get('median_ns')
+            if (type(samples) is int and samples > 0 and type(iterations) is int and iterations >= samples
+                    and type(median) is int and median >= 0):
+                return True
+    return False
 
 
 def select(args):
@@ -64,7 +87,7 @@ def preflight(selected):
     problems = []
     names = ', '.join(w[0] for w in selected)
     for tool in ('cargo', 'rustc') if any(w[1] != 'Edit' for w in selected) else ():
-        if not shutil.which(tool):
+        if shutil.which(tool) is None:
             problems.append(f'{tool} missing; install the pinned Rust toolchain; needed by {names}')
         elif subprocess.run([tool, '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
             problems.append(f'{tool} unavailable; repair the pinned Rust toolchain; needed by {names}')
@@ -117,10 +140,15 @@ def main():
                'verdict': 'No budget; completion is not a performance verdict.', 'workloads': []}
     for name, tier, area in selected:
         start = time.monotonic()
-        with (out / (name + '.log')).open('w') as log:
+        log_path = out / (name + '.log')
+        with log_path.open('w') as log:
             result = subprocess.run(command(name), cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
-        summary['workloads'].append(dict(name=name, tier=tier, area=area, exit=result.returncode, duration_seconds=round(time.monotonic()-start, 3)))
-        print(f'{name}: exit {result.returncode}')
+        status = result.returncode
+        if status == 0 and tier in ('Change', 'Scenario') and not has_measurement(log_path.read_text(), name):
+            status = 1
+            print(f'{name}: no completed benchmark measurement in {log_path}', file=sys.stderr)
+        summary['workloads'].append(dict(name=name, tier=tier, area=area, exit=status, duration_seconds=round(time.monotonic()-start, 3)))
+        print(f'{name}: exit {status}')
     (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
     print(f'summary: {out / "summary.json"}')
     return int(any(w['exit'] for w in summary['workloads']))
