@@ -15,6 +15,8 @@ Build with `make build`; run unit and E2E tests with `cargo test --locked` (`car
 
 ## Verification
 
+`make clean` removes the checkout's ordinary `./target` directory. It refuses a file or symlink at that path.
+
 - Edit: `cargo test --locked <test-name>` selects a focused case; cost varies.
   Change: `cargo test --locked --test e2e <test-name>` selects a PTY scenario.
   Full: `make test CI_TEST_MODE=hosted` runs locked unit and PTY tests; a warm
