@@ -531,6 +531,10 @@ impl TestEditor {
             .join("\n")
     }
 
+    pub(crate) fn console_output_contains(&self, text: &str) -> bool {
+        String::from_utf8_lossy(self.terminal.raw_output()).contains(text)
+    }
+
     pub(crate) fn cursor(&mut self) -> (u16, u16) {
         self.terminal
             .drain(self.deadline())

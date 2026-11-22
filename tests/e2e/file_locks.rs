@@ -9,7 +9,7 @@ fn second_instance_declining_the_takeover_exits_cleanly() {
 
     let mut second = first.next_session_before_ui(&[arg]);
     second.wait_until(std::time::Duration::from_secs(5), |e| {
-        e.screen_text().contains("already open")
+        e.console_output_contains("Take over the lock and open anyway? (y/n)")
     });
     second.send_raw(b"n\r");
 
@@ -27,7 +27,7 @@ fn second_instance_accepting_the_takeover_opens_the_file() {
 
     let mut second = first.next_session_before_ui(&[arg]);
     second.wait_until(std::time::Duration::from_secs(5), |e| {
-        e.screen_text().contains("already open")
+        e.console_output_contains("Take over the lock and open anyway? (y/n)")
     });
     second.send_raw(b"y\r");
     second.wait_until(std::time::Duration::from_secs(5), |e| {
