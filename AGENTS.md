@@ -2,6 +2,8 @@
 
 Build with `make build`; run unit and E2E tests with `cargo test --locked` (`cargo test --test e2e` runs E2E only); check with `cargo clippy --locked --all-targets --all-features -- --deny warnings`.
 
+The roadmap, [docs/roadmap.md](docs/roadmap.md), holds all current and future work; its Status is the resume point.
+
 ## Invariants
 
 - `GapBuffer` keeps `line_starts` and `line_ascii` valid and parallel; byte offsets are internal and `TextPosition::column` is a character index.
